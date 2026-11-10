@@ -69,9 +69,38 @@ spareci cache ls           # what's in the local cache
 spareci down               # after a crash: route jobs back to GitHub, remove stale runners
 ```
 
-Press `^C` once and spareci routes new jobs back to GitHub and lets running jobs finish. Press it twice and running jobs are aborted.
+Press `^C` once and spareci routes new jobs back to GitHub, lets running jobs finish, and then sends any job still queued for this machine to GitHub-hosted runners. Press it twice and running jobs are aborted.
 
 Route only the jobs you want. A job is sent here when its `runs-on` labels are all ones this machine has: `self-hosted`, the OS (`macOS` or `Linux`), the arch (`ARM64` or `X64`) and `spareci` (change it with `--label`). The `vars.SPARECI_RUNS_ON || ...` form is what gives you the fallback, and spareci sets and clears that variable for you.
+
+### Run it in the background
+
+```sh
+spareci install            # start `spareci up` for this repo now and at every login
+spareci install --max 2    # flags after install are passed to `up`
+spareci logs -f            # follow its log
+spareci uninstall          # stop it, route jobs back to GitHub, remove the service
+```
+
+On macOS this is a launchd agent in `~/Library/LaunchAgents`, on Linux a systemd user unit in `~/.config/systemd/user`. Either one restarts spareci within 10 seconds if it crashes or is killed. On a Linux server, run `loginctl enable-linger $USER` so it keeps running while you're logged out.
+
+### When this machine goes away
+
+A job never waits on this machine for long:
+
+- **Busy machine.** A job routed here that waits more than `--max-wait` (default 10 minutes) is sent to GitHub-hosted runners. Turn it off with `--max-wait 0`.
+- **Dead machine** (crash, `kill -9`, power cut, a laptop that went to sleep). Nothing on the machine can clean up, so a small workflow on GitHub does it. Add it once:
+
+  ```sh
+  spareci watchdog > .github/workflows/spareci-watchdog.yml   # commit it to your default branch
+  gh secret set SPARECI_TOKEN   # paste a fine-grained token for this repo with "Variables: read and write"
+  ```
+
+  While spareci is up it refreshes a heartbeat variable every minute. When the heartbeat is more than 5 minutes old, the watchdog clears the routing variable and re-runs jobs that were queued for this machine on GitHub-hosted runners. Expect that within about 15 to 20 minutes of the machine going away, longer if GitHub is slow to start scheduled workflows. While spareci is healthy, the watchdog's runs are skipped and use no Actions minutes.
+
+  The token is needed because a workflow's own `GITHUB_TOKEN` can't change repo variables. When the machine comes back, spareci turns routing on again by itself.
+
+Sending a job back means cancelling its workflow run and re-running it, because GitHub reads `vars` once per run attempt. Usually only the cancelled jobs are re-run. If an earlier job in the run already finished on this machine, the whole run is re-run on GitHub, since that job's caches are on this machine where a GitHub-hosted job can't restore them. See [docs/how-it-works.md](docs/how-it-works.md#routing).
 
 ## How it works
 
@@ -96,7 +125,8 @@ Per-job VM isolation (Tart on macOS, containers or microVMs on Linux) is the nex
 - Jobs share your home directory, so tools' own caches (`~/go`, `~/.npm`, `~/.cargo`, ...) are your personal ones, and `setup-*` actions will cache them. A separate job home is part of the isolation work.
 - One repo per `spareci up` process.
 - Jobs using `container:` or Docker container actions can't reach the local cache yet; they fall back to GitHub's cache.
-- If spareci is killed without `^C` (crash, power loss), the routing variable stays set and jobs queue until you run `spareci down` or start it again. A background service with crash-safe routing is planned.
+- Without the watchdog workflow, if spareci dies without `^C` (crash, power loss), jobs queue for this machine until it starts again or you run `spareci down`. `spareci install` restarts it after a crash, but can't help when the machine itself is off.
+- Sending a job back to GitHub cancels its whole run first, because GitHub has no per-job cancel. `--max-wait` therefore waits until no job in that run is running. If any job in the run already finished here, the whole run is re-run on GitHub, which repeats that work.
 
 ## Contributing
 
