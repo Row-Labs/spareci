@@ -35,11 +35,11 @@ A typical pull request run (`checks`, `tauri` and `mobile` on macOS) billed 10 m
 
 ## The first run on spareci
 
-The spike ran Commission's `checks` job on an Apple Silicon Mac with spareci (then called `homerun`), changing nothing in the workflow but the `runs-on` line. The job installs dependencies with pnpm, then typechecks, lints, checks formatting, runs the unit and contract tests and builds the web app. It passed: run 42856146332, 2026-11-10.
+The spike ran Commission's `checks` job on an Apple Silicon Mac with spareci (then called `homerun`), changing nothing in the workflow but the `runs-on` line. The job installs dependencies with pnpm, then typechecks, lints, checks formatting, runs the unit and contract tests and builds the web app. It passed: run 42856146332, 2026-11-10. This was the spike build, before spareci had its local cache, so the job saved its cache to GitHub's cache service like any self-hosted runner.
 
 To compare, here are the 37 successful `checks` jobs on GitHub's `macos-15` from 2026-11-08 to 2026-11-10:
 
-| Step | GitHub `macos-15` (median of 37) | spareci (run 42856146332) |
+| Step | GitHub `macos-15` (median of 37) | spareci spike (run 42856146332) |
 |---|---|---|
 | Whole job | 6m40s (range 5m45s to 7m57s) | 6m37s |
 | Install | 22s | 19s |
@@ -54,7 +54,7 @@ On a GitHub-hosted runner, `actions/cache` uploads to storage in the same cloud,
 
 So spareci now runs its own cache server on the machine. `actions/cache` and every `setup-*` action's `cache:` option talk to it instead of GitHub, and the archives stay on local disk. It follows GitHub's rules: keys are immutable, a pull request can read its base branch's caches but not write them, and old entries are evicted past a size limit. [How it works](how-it-works.md#local-cache) has the protocol details.
 
-spareci's own CI shows the difference on one 1.19 GB Go module and build cache, saved from the same Mac:
+These cache numbers come from spareci's own CI (`Row-Labs/spareci`), not from Commission. It shows the difference on one 1.19 GB Go module and build cache, saved from the same Mac:
 
 | | GitHub's cache (run 42863196283) | Local cache (run 42865164223) |
 |---|---|---|
@@ -93,4 +93,12 @@ spareci is free and the Mac was already there, so the direct cost is the machine
 
 ## About the numbers
 
-Commission is a supervisor for Claude Code sessions, built by the author of spareci. Its repository is private, so readers can't open its run IDs, but they're the ones the numbers were read from. The cache and watchdog runs are in spareci's own repository. Billed minutes round each job up to the whole minute, as GitHub does. Step timings come from the jobs API's step timestamps, and cache transfer rates from the `actions/cache` log lines. Prices are GitHub's list prices as of 2026-11-10, from [GitHub's pricing page](https://docs.github.com/en/billing/reference/actions-runner-pricing).
+Commission is a supervisor for Claude Code sessions, built by the author of spareci. Its repository is private, so readers can't open its run IDs, but they're the ones the numbers were read from.
+
+Where each number comes from:
+
+- **Commission's repo (`Row-Labs/relay`), GitHub-hosted runs:** the bill, the per-job breakdown, the `macos-15` baseline, the concurrency figures, the release build minutes and the first Linux CI run (42872824005).
+- **The spareci spike on Commission's repo:** the one `checks` run on spareci (42856146332), which used GitHub's cache, not the local one.
+- **The spike's sandbox repo** (since deleted): the 59s and 81s `setup-go` cache timings, as recorded in the spike notes.
+- **spareci's own CI (`Row-Labs/spareci`):** every local cache measurement (42863196283, 42865164223, 42886931380, 42904037716) and the watchdog runs (42893719071, 42895780440, 42894946226).
+ Billed minutes round each job up to the whole minute, as GitHub does. Step timings come from the jobs API's step timestamps, and cache transfer rates from the `actions/cache` log lines. Prices are GitHub's list prices as of 2026-11-10, from [GitHub's pricing page](https://docs.github.com/en/billing/reference/actions-runner-pricing).
