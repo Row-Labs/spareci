@@ -10,10 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/Row-Labs/spareci/internal/cache"
 	"github.com/Row-Labs/spareci/internal/gh"
 	"github.com/Row-Labs/spareci/internal/pool"
 	"github.com/Row-Labs/spareci/internal/runner"
@@ -23,8 +25,10 @@ const usage = `spareci: run your GitHub Actions jobs on your own machine.
 
 Usage:
   spareci up     [--repo owner/name] [--label spareci] [--max 1] [--dry-run]
+                 [--cache=true] [--cache-size 10GB]
   spareci status [--repo owner/name]
   spareci down   [--repo owner/name]   clear routing and stale runners after a crash
+  spareci cache  ls|clear [--repo owner/name]
 
 In your workflow, route jobs here when spareci is up, and to GitHub otherwise:
 
@@ -44,6 +48,8 @@ func main() {
 		err = status(os.Args[2:])
 	case "down":
 		err = down(os.Args[2:])
+	case "cache":
+		err = cacheCmd(os.Args[2:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -90,6 +96,9 @@ func up(args []string) error {
 	dry := fs.Bool("dry-run", false, "log the jobs we would take; register nothing")
 	verbose := fs.Bool("v", false, "debug logging")
 	version := fs.String("runner-version", "", "actions/runner version (default: latest)")
+	useCache := fs.Bool("cache", true, "serve actions/cache from this machine's disk instead of GitHub")
+	cacheSize := fs.String("cache-size", "10GB", "local cache size before least recently used entries are evicted")
+	upstream := fs.String("cache-upstream", cache.DefaultUpstream, "GitHub results service, for calls the local cache passes through (artifacts)")
 	_ = fs.Parse(args)
 	if *verbose {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
@@ -130,8 +139,15 @@ func up(args []string) error {
 		host.Prune()
 	}
 
+	var cacheSrv *cache.Server
+	if *useCache && !*dry {
+		if cacheSrv, err = startCache(host, *cacheSize, *upstream); err != nil {
+			slog.Warn("local cache off; jobs will use GitHub's cache", "err", err)
+		}
+	}
+
 	labels := append(runner.DefaultLabels(), c.label)
-	slog.Info("spareci up", "repo", c.repo, "labels", labels, "max", *maxN, "runner", host.Version, "dir", host.Root, "dry_run", *dry)
+	slog.Info("spareci up", "repo", c.repo, "labels", labels, "max", *maxN, "runner", host.Version, "dir", host.Root, "local_cache", cacheSrv != nil, "dry_run", *dry)
 	p := pool.New(pool.Config{
 		Repo:        c.repo,
 		Labels:      labels,
@@ -140,6 +156,7 @@ func up(args []string) error {
 		FallbackVar: c.vname,
 		RouteLabel:  c.label,
 		DryRun:      *dry,
+		Cache:       cacheSrv,
 	}, client, host)
 	return p.Run(soft, hard)
 }
@@ -206,5 +223,48 @@ func down(args []string) error {
 			fmt.Printf("removed stale runner %s\n", r.Name)
 		}
 	}
+	return nil
+}
+
+func cacheDir() string { return filepath.Join(runner.DefaultRoot(), "actions-cache") }
+
+func startCache(host *runner.Host, size, upstream string) (*cache.Server, error) {
+	maxBytes, err := cache.ParseBytes(size)
+	if err != nil {
+		return nil, err
+	}
+	if err := host.PrepareCacheVariant(); err != nil {
+		return nil, err
+	}
+	store, err := cache.Open(cacheDir(), maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	return cache.NewServer(store, upstream)
+}
+
+func cacheCmd(args []string) error {
+	if len(args) == 0 || (args[0] != "ls" && args[0] != "clear") {
+		return fmt.Errorf("usage: spareci cache ls|clear [--repo owner/name]")
+	}
+	fs := flag.NewFlagSet("cache", flag.ExitOnError)
+	repo := fs.String("repo", "", "only this repo (default: all)")
+	_ = fs.Parse(args[1:])
+	store, err := cache.Open(cacheDir(), 0)
+	if err != nil {
+		return err
+	}
+	if args[0] == "clear" {
+		n, err := store.Delete(*repo)
+		fmt.Printf("removed %d entries\n", n)
+		return err
+	}
+	entries := store.List(*repo)
+	var total int64
+	for _, e := range entries {
+		total += e.Size
+		fmt.Printf("%-24s %-22s %9s  %s\n", e.Repo, e.Scope, cache.HumanBytes(e.Size), e.Key)
+	}
+	fmt.Printf("%d entries, %s in %s\n", len(entries), cache.HumanBytes(total), cacheDir())
 	return nil
 }

@@ -4,15 +4,59 @@ on:
   push:
   workflow_dispatch:
 
+# Every job runs on a machine running `spareci up` while one is up, and on
+# GitHub-hosted runners otherwise, so CI checks spareci both ways.
 jobs:
   build:
-    # On a machine running `spareci up` while it's up; GitHub-hosted otherwise.
     runs-on: ${{ vars.SPARECI_RUNS_ON || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Install the real @actions/cache client for the compat test
+        run: npm ci --prefix test/compat --no-audit --no-fund
       - run: go vet ./...
       - run: go test ./...
       - run: go build -o bin/spareci ./cmd/spareci
+
+  # End to end through real actions: save in one job, restore in the next.
+  cache-save:
+    runs-on: ${{ vars.SPARECI_RUNS_ON || 'ubuntu-24.04' }}
+    steps:
+      - name: Where the cache goes
+        run: |
+          echo "runner: ${{ runner.environment }}"
+          echo "ACTIONS_RESULTS_URL=${ACTIONS_RESULTS_URL}"
+      - name: Self-hosted jobs must use the local cache
+        if: runner.environment == 'self-hosted'
+        run: |
+          case "$ACTIONS_RESULTS_URL" in http://127.0.0.1:*) ;; *) echo "::error::cache is not local"; exit 1;; esac
+      - run: mkdir -p payload && head -c 20000000 /dev/urandom > payload/blob && shasum -a 256 payload/blob | tee payload.sha
+      - uses: actions/cache/save@v4
+        with:
+          path: payload
+          key: e2e-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: payload-sha-${{ github.run_attempt }}
+          path: payload.sha
+
+  cache-restore:
+    needs: cache-save
+    runs-on: ${{ vars.SPARECI_RUNS_ON || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: payload-sha-${{ github.run_attempt }}
+      - id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: payload
+          key: e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - name: Restored content matches
+        run: shasum -a 256 -c payload.sha

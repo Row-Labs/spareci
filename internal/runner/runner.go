@@ -22,6 +22,8 @@ import (
 type Host struct {
 	Root    string // cache root: runner installs, job dirs, logs, shared tool cache
 	Version string
+
+	source string // install to clone per job; set by PrepareCacheVariant
 }
 
 func DefaultRoot() string {
@@ -113,8 +115,8 @@ type Result struct {
 // Run clones the installed runner (copy-on-write where the filesystem allows),
 // runs it for a single job with the given JIT config, and deletes the clone.
 // Cancelling ctx stops the runner gracefully, then forcibly. onStart is called
-// when the runner picks up its job.
-func (h *Host) Run(ctx context.Context, name, jitConfig string, onStart func()) (Result, error) {
+// when the runner picks up its job. extraEnv (KEY=VALUE) reaches every step.
+func (h *Host) Run(ctx context.Context, name, jitConfig string, extraEnv []string, onStart func()) (Result, error) {
 	res := Result{Log: filepath.Join(h.LogsDir(), name+".log")}
 	dir := filepath.Join(h.jobsDir(), name)
 	if err := os.MkdirAll(h.jobsDir(), 0o755); err != nil {
@@ -127,11 +129,15 @@ func (h *Host) Run(ctx context.Context, name, jitConfig string, onStart func()) 
 		return res, err
 	}
 	defer os.RemoveAll(dir)
-	if err := clone(h.installDir(), dir); err != nil {
+	src := h.source
+	if src == "" {
+		src = h.installDir()
+	}
+	if err := clone(src, dir); err != nil {
 		return res, fmt.Errorf("clone runner: %w", err)
 	}
-	env := fmt.Sprintf("AGENT_TOOLSDIRECTORY=%s\nRUNNER_TOOL_CACHE=%s\n", h.ToolCache(), h.ToolCache())
-	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(env), 0o644); err != nil {
+	env := append([]string{"AGENT_TOOLSDIRECTORY=" + h.ToolCache(), "RUNNER_TOOL_CACHE=" + h.ToolCache()}, extraEnv...)
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(strings.Join(env, "\n")+"\n"), 0o644); err != nil {
 		return res, err
 	}
 
@@ -143,7 +149,7 @@ func (h *Host) Run(ctx context.Context, name, jitConfig string, onStart func()) 
 
 	cmd := exec.Command(filepath.Join(dir, "run.sh"), "--jitconfig", jitConfig)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "AGENT_TOOLSDIRECTORY="+h.ToolCache(), "RUNNER_TOOL_CACHE="+h.ToolCache())
+	cmd.Env = append(os.Environ(), env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	pr, pw := io.Pipe()
 	cmd.Stdout, cmd.Stderr = pw, pw

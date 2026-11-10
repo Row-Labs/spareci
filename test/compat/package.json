@@ -1,0 +1,9 @@
+{
+  "name": "spareci-compat",
+  "private": true,
+  "description": "Runs the real @actions/cache client against spareci's local cache server. Driven by internal/cache/compat_test.go.",
+  "type": "module",
+  "dependencies": {
+    "@actions/cache": "^6.3.0"
+  }
+}

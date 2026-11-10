@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Row-Labs/spareci/internal/cache"
 	"github.com/Row-Labs/spareci/internal/gh"
 	"github.com/Row-Labs/spareci/internal/runner"
 )
@@ -23,6 +24,7 @@ type Config struct {
 	FallbackVar string // repo variable set to Labels' routing label while up; "" disables
 	RouteLabel  string // value written to FallbackVar
 	DryRun      bool
+	Cache       *cache.Server // nil: jobs use GitHub's cache service
 }
 
 type Pool struct {
@@ -159,6 +161,15 @@ func (p *Pool) spawn(ctx, hardCtx context.Context) error {
 	}
 	// The runner outlives the soft ctx (in-flight jobs finish on first ^C)
 	// but not the hard one.
+	var env []string
+	var jl *cache.JobListener
+	if p.cfg.Cache != nil {
+		if jl, err = p.cfg.Cache.Register(p.cfg.Repo); err != nil {
+			slog.Warn("local cache unavailable for this job; it will use GitHub's", "err", err)
+		} else {
+			env = jl.Env()
+		}
+	}
 	runCtx, cancel := context.WithCancel(hardCtx)
 	w := &worker{name: name, spawned: time.Now(), cancel: cancel, runnerID: jit.ID}
 	p.mu.Lock()
@@ -168,7 +179,10 @@ func (p *Pool) spawn(ctx, hardCtx context.Context) error {
 
 	go func() {
 		defer cancel()
-		res, err := p.host.Run(runCtx, name, jit.Config, func() {
+		if jl != nil {
+			defer jl.Close()
+		}
+		res, err := p.host.Run(runCtx, name, jit.Config, env, func() {
 			p.mu.Lock()
 			w.started = time.Now()
 			p.mu.Unlock()
