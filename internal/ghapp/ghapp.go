@@ -73,6 +73,10 @@ func Name(repo string, suffix string) string {
 	return "spareci-" + name + "-" + suffix
 }
 
+// VariablesPermission is GitHub's key for the repository permission titled
+// "Variables" (Actions variables): read lists them, write deletes them.
+const VariablesPermission = "actions_variables"
+
 // Manifest is the app definition. It asks for Variables: write and nothing
 // else (metadata: read comes with every app). Cancelling and re-running stays
 // with the workflow's own GITHUB_TOKEN. No webhook, and the app is private,
@@ -89,7 +93,7 @@ func Manifest(t Target, name, base string) map[string]any {
 			"url":    t.RepoURL,
 			"active": false,
 		},
-		"default_permissions": map[string]string{"variables": "write"},
+		"default_permissions": map[string]string{VariablesPermission: "write"},
 		"default_events":      []string{},
 	}
 }

@@ -211,7 +211,7 @@ func TestSetupFlow(t *testing.T) {
 		t.Errorf("secrets = %v", secrets.got)
 	}
 	perms, _ := manifest["default_permissions"].(map[string]any)
-	if len(perms) != 1 || perms["variables"] != "write" || manifest["public"] != false {
+	if len(perms) != 1 || perms["actions_variables"] != "write" || manifest["public"] != false {
 		t.Errorf("manifest = %v", manifest)
 	}
 	if hook, _ := manifest["hook_attributes"].(map[string]any); hook["active"] != false {
