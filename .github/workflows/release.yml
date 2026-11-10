@@ -21,6 +21,32 @@ jobs:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go test -short ./...
+      # Sign and notarize only when all five Apple secrets are set, so releases
+      # keep working (unsigned) before they exist. A partial set fails rather
+      # than quietly shipping unsigned. See docs/releasing.md.
+      - name: Check Apple signing secrets
+        id: apple
+        env:
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          set=0
+          for v in MACOS_SIGN_P12 MACOS_SIGN_PASSWORD MACOS_NOTARY_KEY MACOS_NOTARY_KEY_ID MACOS_NOTARY_ISSUER_ID; do
+            if [ -n "${!v}" ]; then set=$((set + 1)); else missing="$missing $v"; fi
+          done
+          if [ "$set" -eq 5 ]; then
+            echo "notarize=true" >> "$GITHUB_OUTPUT"
+            echo "macOS binaries will be signed and notarized."
+          elif [ "$set" -eq 0 ]; then
+            echo "notarize=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Apple signing secrets set; macOS binaries ship unsigned."
+          else
+            echo "::error::Some Apple signing secrets are set but these are missing:$missing"
+            exit 1
+          fi
       - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
@@ -29,3 +55,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          MACOS_NOTARIZE: ${{ steps.apple.outputs.notarize }}
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
