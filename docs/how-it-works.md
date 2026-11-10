@@ -11,6 +11,7 @@
 | `internal/service` | `spareci install`: launchd agent (macOS), systemd user unit (Linux) |
 | `internal/runner` | Installs `actions/runner`, clones it per job, runs it with the job's home and environment, patches the worker for the cache |
 | `internal/cache` | Local implementation of GitHub's cache service |
+| `internal/workflows` | `spareci init`: finds jobs' `runs-on`, judges which suit this machine, rewrites the chosen lines in place |
 | `internal/estimate` | `spareci estimate`: prices recent jobs at GitHub's list prices |
 
 ## Job lifecycle
@@ -72,6 +73,12 @@ so it's skipped, and isn't billed, whenever routing is off or the firing is list
 - Logs: stdout and stderr are appended to `<cache dir>/service/spareci-<owner>-<repo>.log`. `spareci logs [-f]` tails it.
 - `spareci uninstall` stops the service, deletes the file, and then does what `spareci down` does, in case the service was already dead.
 
+## spareci init
+
+`internal/workflows` parses each workflow with `go.yaml.in/yaml/v3` only to find where each job's `runs-on` key and value sit (line and column). The rewrite is a text edit of those lines, so comments, quoting and everything else in the file stay byte for byte. A double-quoted value stays double-quoted; a block list (`- label` per line) is folded onto the `runs-on:` line. Anything that isn't a plain label or list of labels is skipped with a reason rather than guessed at.
+
+Fit: GitHub-hosted labels map to an OS and architecture (`ubuntu-*-arm` is arm64, `macos-13` and `*-intel`/`*-large` are x64, other `macos-14+` are arm64). Same OS and architecture is recommended; another architecture, a Linux job on a Mac or an unknown label can be chosen by name; Windows, macOS on Linux and container jobs on macOS can't.
+
 ## Job home and environment
 
 `runner.ResolveJobHome` turns `--job-home` into a directory, and `runner.JobEnv` builds the runner's environment from spareci's own:
@@ -117,6 +124,6 @@ It checks `GET /rate_limit` before fetching jobs (one request per run) and stops
 
 ## Testing
 
-- `go test -short ./...`: unit tests, including the cache protocol over HTTP, the lease and rescue logic against a fake GitHub, and the rendered launchd and systemd files.
+- `go test -short ./...`: unit tests, including the cache protocol over HTTP, the lease and rescue logic against a fake GitHub, the rendered launchd and systemd files, and `init`'s rewrites (table tests over realistic workflows in `internal/workflows/testdata`).
 - `go test ./...` with `npm ci --prefix test/compat` done first: also runs the real `@actions/cache` npm client against the server (`test/compat/compat.mjs`), covering both upload paths, restore keys, misses and immutability.
 - CI (`.github/workflows/ci.yml`) runs on spareci when it's up, and on GitHub-hosted runners otherwise. Its `cache-save` → `cache-restore` jobs check a real save and restore through `actions/cache`, plus artifact pass-through. On self-hosted runners they also assert that the cache really was local.

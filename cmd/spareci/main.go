@@ -31,6 +31,8 @@ var version = "dev"
 const usage = `spareci: run your GitHub Actions jobs on your own machine.
 
 Usage:
+  spareci init      [--jobs workflow:job,...] [--all-compatible] [--dry-run]
+                    opt this repo's workflow jobs in to spareci and open a PR
   spareci up        [--repo owner/name] [--label spareci] [--max 1] [--max-wait 10m]
                     [--dry-run] [--cache=true] [--cache-size 10GB]
                     [--job-home spareci|user|PATH]
@@ -44,7 +46,8 @@ Usage:
   spareci estimate  [--repo owner/name]... [--org name] [--days 30] [--json]
   spareci version
 
-In your workflow, route jobs here when spareci is up, and to GitHub otherwise:
+In your workflow (spareci init does this), route jobs here when spareci is up,
+and to GitHub otherwise:
 
   runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }}
 `
@@ -62,6 +65,8 @@ func main() {
 		err = status(os.Args[2:])
 	case "down":
 		err = down(os.Args[2:])
+	case "init":
+		err = initCmd(os.Args[2:])
 	case "install":
 		err = install(os.Args[2:])
 	case "uninstall":

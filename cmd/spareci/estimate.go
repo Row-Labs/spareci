@@ -112,8 +112,3 @@ func estimateCmd(args []string) error {
 	rep.Text(os.Stdout)
 	return nil
 }
-
-func isTerminal(f *os.File) bool {
-	fi, err := f.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
-}
