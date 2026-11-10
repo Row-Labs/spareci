@@ -1,4 +1,4 @@
-// Package gh is the small slice of the GitHub REST API homerun needs: finding
+// Package gh is the small slice of the GitHub REST API spareci needs: finding
 // queued jobs, minting just-in-time runners, and the fallback repo variable.
 package gh
 
@@ -78,7 +78,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("User-Agent", "homerun")
+	req.Header.Set("User-Agent", "spareci")
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

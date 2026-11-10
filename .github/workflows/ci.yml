@@ -6,8 +6,8 @@ on:
 
 jobs:
   build:
-    # On a machine running `homerun up` while it's up; GitHub-hosted otherwise.
-    runs-on: ${{ vars.HOMERUN_RUNS_ON || 'ubuntu-24.04' }}
+    # On a machine running `spareci up` while it's up; GitHub-hosted otherwise.
+    runs-on: ${{ vars.SPARECI_RUNS_ON || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
@@ -15,4 +15,4 @@ jobs:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go test ./...
-      - run: go build -o bin/homerun ./cmd/homerun
+      - run: go build -o bin/spareci ./cmd/spareci

@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blaze-rowland/homerun/internal/gh"
-	"github.com/blaze-rowland/homerun/internal/runner"
+	"github.com/Row-Labs/spareci/internal/gh"
+	"github.com/Row-Labs/spareci/internal/runner"
 )
 
 type Config struct {
@@ -150,7 +150,7 @@ func (p *Pool) spawn(ctx, hardCtx context.Context) error {
 	host = strings.Split(host, ".")[0]
 	p.mu.Lock()
 	p.seq++
-	name := fmt.Sprintf("homerun-%s-%d-%d", host, time.Now().Unix(), p.seq)
+	name := fmt.Sprintf("spareci-%s-%d-%d", host, time.Now().Unix(), p.seq)
 	p.mu.Unlock()
 
 	jit, err := p.gh.GenerateJIT(ctx, p.cfg.Repo, name, p.cfg.Labels)

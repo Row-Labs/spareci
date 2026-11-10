@@ -29,7 +29,7 @@ func DefaultRoot() string {
 	if err != nil {
 		dir = os.TempDir()
 	}
-	return filepath.Join(dir, "homerun")
+	return filepath.Join(dir, "spareci")
 }
 
 func (h *Host) installDir() string { return filepath.Join(h.Root, "runner", h.Version) }

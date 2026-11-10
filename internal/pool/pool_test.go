@@ -3,20 +3,20 @@ package pool
 import (
 	"testing"
 
-	"github.com/blaze-rowland/homerun/internal/gh"
+	"github.com/Row-Labs/spareci/internal/gh"
 )
 
 func TestMatches(t *testing.T) {
-	p := New(Config{Labels: []string{"self-hosted", "macOS", "ARM64", "homerun"}}, nil, nil)
+	p := New(Config{Labels: []string{"self-hosted", "macOS", "ARM64", "spareci"}}, nil, nil)
 	cases := []struct {
 		labels []string
 		want   bool
 	}{
-		{[]string{"homerun"}, true},
+		{[]string{"spareci"}, true},
 		{[]string{"self-hosted", "macos"}, true}, // case-insensitive, like GitHub
-		{[]string{"self-hosted", "macOS", "ARM64", "homerun"}, true},
+		{[]string{"self-hosted", "macOS", "ARM64", "spareci"}, true},
 		{[]string{"macos-15"}, false}, // GitHub-hosted label
-		{[]string{"homerun", "gpu"}, false},
+		{[]string{"spareci", "gpu"}, false},
 		{nil, false},
 	}
 	for _, c := range cases {

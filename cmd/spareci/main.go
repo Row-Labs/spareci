@@ -1,4 +1,4 @@
-// homerun turns the machine you're on into GitHub Actions runners for a repo:
+// spareci turns the machine you're on into GitHub Actions runners for a repo:
 // single-use, on demand, and out of the way when the machine is off.
 package main
 
@@ -14,21 +14,21 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/blaze-rowland/homerun/internal/gh"
-	"github.com/blaze-rowland/homerun/internal/pool"
-	"github.com/blaze-rowland/homerun/internal/runner"
+	"github.com/Row-Labs/spareci/internal/gh"
+	"github.com/Row-Labs/spareci/internal/pool"
+	"github.com/Row-Labs/spareci/internal/runner"
 )
 
-const usage = `homerun: run your GitHub Actions jobs on your own machine.
+const usage = `spareci: run your GitHub Actions jobs on your own machine.
 
 Usage:
-  homerun up     [--repo owner/name] [--label homerun] [--max 1] [--dry-run]
-  homerun status [--repo owner/name]
-  homerun down   [--repo owner/name]   clear routing and stale runners after a crash
+  spareci up     [--repo owner/name] [--label spareci] [--max 1] [--dry-run]
+  spareci status [--repo owner/name]
+  spareci down   [--repo owner/name]   clear routing and stale runners after a crash
 
-In your workflow, route jobs here when homerun is up, and to GitHub otherwise:
+In your workflow, route jobs here when spareci is up, and to GitHub otherwise:
 
-  runs-on: ${{ vars.HOMERUN_RUNS_ON || 'macos-15' }}
+  runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }}
 `
 
 func main() {
@@ -51,7 +51,7 @@ func main() {
 		os.Exit(2)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "homerun:", err)
+		fmt.Fprintln(os.Stderr, "spareci:", err)
 		os.Exit(1)
 	}
 }
@@ -65,8 +65,8 @@ type common struct {
 func commonFlags(fs *flag.FlagSet) *common {
 	c := &common{}
 	fs.StringVar(&c.repo, "repo", "", "owner/name (default: the repo in the current directory)")
-	fs.StringVar(&c.label, "label", "homerun", "label that routes a job to this machine")
-	fs.StringVar(&c.vname, "fallback-var", "HOMERUN_RUNS_ON", "repo variable set to --label while up (empty to disable)")
+	fs.StringVar(&c.label, "label", "spareci", "label that routes a job to this machine")
+	fs.StringVar(&c.vname, "fallback-var", "SPARECI_RUNS_ON", "repo variable set to --label while up (empty to disable)")
 	return c
 }
 
@@ -131,7 +131,7 @@ func up(args []string) error {
 	}
 
 	labels := append(runner.DefaultLabels(), c.label)
-	slog.Info("homerun up", "repo", c.repo, "labels", labels, "max", *maxN, "runner", host.Version, "dir", host.Root, "dry_run", *dry)
+	slog.Info("spareci up", "repo", c.repo, "labels", labels, "max", *maxN, "runner", host.Version, "dir", host.Root, "dry_run", *dry)
 	p := pool.New(pool.Config{
 		Repo:        c.repo,
 		Labels:      labels,
@@ -199,7 +199,7 @@ func down(args []string) error {
 		return err
 	}
 	for _, r := range runners {
-		if strings.HasPrefix(r.Name, "homerun-") && r.Status == "offline" {
+		if strings.HasPrefix(r.Name, "spareci-") && r.Status == "offline" {
 			if err := client.DeleteRunner(ctx, c.repo, r.ID); err != nil {
 				return err
 			}
