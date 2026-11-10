@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"flag"
 	"fmt"
@@ -34,6 +35,7 @@ Usage:
                     opt this repo's workflow jobs in to spareci and open a PR
   spareci up        [--repo owner/name] [--label spareci] [--max 1] [--max-wait 10m]
                     [--dry-run] [--cache=true] [--cache-size 10GB]
+                    [--job-home spareci|user|PATH]
   spareci install   [--repo owner/name] [up flags]   run "up" in the background, at login
   spareci uninstall [--repo owner/name]
   spareci logs      [--repo owner/name] [-f] [-n 50]
@@ -41,6 +43,7 @@ Usage:
   spareci status    [--repo owner/name]
   spareci down      [--repo owner/name]   route jobs back to GitHub after a crash
   spareci cache     ls|clear [--repo owner/name]
+  spareci estimate  [--repo owner/name]... [--org name] [--days 30] [--json]
   spareci version
 
 In your workflow (spareci init does this), route jobs here when spareci is up,
@@ -74,6 +77,8 @@ func main() {
 		err = watchdog(os.Args[2:])
 	case "cache":
 		err = cacheCmd(os.Args[2:])
+	case "estimate":
+		err = estimateCmd(os.Args[2:])
 	case "version", "--version":
 		fmt.Println("spareci", version)
 	case "-h", "--help", "help":
@@ -131,6 +136,7 @@ type upOpts struct {
 	useCache  *bool
 	cacheSize *string
 	upstream  *string
+	jobHome   *string
 }
 
 // upFlags defines up's flags; install checks its pass-through flags with it.
@@ -146,6 +152,7 @@ func upFlags(fs *flag.FlagSet) *upOpts {
 		useCache:  fs.Bool("cache", true, "serve actions/cache from this machine's disk instead of GitHub"),
 		cacheSize: fs.String("cache-size", "10GB", "local cache size before least recently used entries are evicted"),
 		upstream:  fs.String("cache-upstream", cache.DefaultUpstream, "GitHub results service, for calls the local cache passes through (artifacts)"),
+		jobHome:   fs.String("job-home", runner.HomeSpareci, `HOME for jobs: "spareci" (a separate home per repo), "user" (your own home and environment), or a path`),
 	}
 }
 
@@ -155,7 +162,7 @@ func up(args []string) error {
 	_ = fs.Parse(args)
 	c := o.common
 	maxN, maxWait, interval, dry, verbose, version := o.maxN, o.maxWait, o.interval, o.dry, o.verbose, o.version
-	useCache, cacheSize, upstream := o.useCache, o.cacheSize, o.upstream
+	useCache, cacheSize, upstream, jobHome := o.useCache, o.cacheSize, o.upstream, o.jobHome
 	if *verbose {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
@@ -183,6 +190,9 @@ func up(args []string) error {
 	}()
 
 	host := &runner.Host{Root: runner.DefaultRoot(), Version: *version}
+	if host.JobHome, err = runner.ResolveJobHome(*jobHome, host.Root, c.repo); err != nil {
+		return err
+	}
 	if host.Version == "" {
 		if host.Version, err = client.LatestRunnerVersion(soft); err != nil {
 			return fmt.Errorf("find runner version: %w", err)
@@ -203,7 +213,7 @@ func up(args []string) error {
 	}
 
 	labels := append(runner.DefaultLabels(), c.label)
-	slog.Info("spareci up", "repo", c.repo, "labels", labels, "max", *maxN, "runner", host.Version, "dir", host.Root, "local_cache", cacheSrv != nil, "dry_run", *dry)
+	slog.Info("spareci up", "repo", c.repo, "labels", labels, "max", *maxN, "runner", host.Version, "dir", host.Root, "job_home", cmp.Or(host.JobHome, "user"), "local_cache", cacheSrv != nil, "dry_run", *dry)
 	p := pool.New(pool.Config{
 		Repo:     c.repo,
 		Labels:   labels,

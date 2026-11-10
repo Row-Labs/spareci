@@ -5,13 +5,14 @@
 | Package | Job |
 |---|---|
 | `cmd/spareci` | CLI: flags, signals, wiring |
-| `internal/gh` | The few GitHub REST calls needed: queued jobs, JIT runners, repo variables |
+| `internal/gh` | The few GitHub REST calls needed: queued jobs, JIT runners, repo variables, run history |
 | `internal/pool` | Poll loop: decides how many runners to start, applies `--max-wait`, drains on shutdown |
 | `internal/route` | Routing and heartbeat variables, sending queued jobs back to GitHub, the watchdog workflow |
 | `internal/service` | `spareci install`: launchd agent (macOS), systemd user unit (Linux) |
-| `internal/runner` | Installs `actions/runner`, clones it per job, runs it, patches the worker for the cache |
+| `internal/runner` | Installs `actions/runner`, clones it per job, runs it with the job's home and environment, patches the worker for the cache |
 | `internal/cache` | Local implementation of GitHub's cache service |
 | `internal/workflows` | `spareci init`: finds jobs' `runs-on`, judges which suit this machine, rewrites the chosen lines in place |
+| `internal/estimate` | `spareci estimate`: prices recent jobs at GitHub's list prices |
 
 ## Job lifecycle
 
@@ -78,6 +79,20 @@ so it's skipped, and isn't billed, whenever routing is off or the firing is list
 
 Fit: GitHub-hosted labels map to an OS and architecture (`ubuntu-*-arm` is arm64, `macos-13` and `*-intel`/`*-large` are x64, other `macos-14+` are arm64). Same OS and architecture is recommended; another architecture, a Linux job on a Mac or an unknown label can be chosen by name; Windows, macOS on Linux and container jobs on macOS can't.
 
+## Job home and environment
+
+`runner.ResolveJobHome` turns `--job-home` into a directory, and `runner.JobEnv` builds the runner's environment from spareci's own:
+
+- `spareci` (default): `HOME` is `<cache root>/home/<owner>/<repo>`, created `0700` and kept between jobs. One per repo, so a job in one repo can't leave a `~/.gitconfig` or `~/.npmrc` that changes another repo's jobs.
+- `user`: the environment passes through unchanged, as before this existed.
+- An absolute path: used as `HOME`, with the same filtering as `spareci`.
+
+With a separate home, only an allowlist of variables reaches the runner (`passEnv` in `internal/runner/home.go`: locale, `TMPDIR`, proxy and CA settings, `DEVELOPER_DIR`, `DOCKER_HOST`, `XDG_RUNTIME_DIR`, `PATH`). `PATH` entries inside the user's home are dropped, since tools there (rustup proxies, nvm shims) would look for their state in the real home. `GIT_CONFIG_NOSYSTEM=1` keeps the system gitconfig's keychain credential helper away from jobs.
+
+No tool-specific variables are set. Go (`GOPATH`, `GOMODCACHE`, `GOCACHE`), npm, pip, cargo, rustup and the XDG defaults all derive from `HOME`, and the inherited overrides are dropped, so `setup-go`'s `go env GOMODCACHE` points into the job home. `TestJobEnvMovesGoState` checks this with the real Go toolchain.
+
+Not covered: `ssh` and Xcode read the home directory from the user database, not `HOME`, and anything the user can read stays readable. See the README's "What a job can see" and [isolation.md](isolation.md).
+
 ## Local cache
 
 `@actions/cache` (inside `actions/cache` and every `setup-*` action's `cache:` option) talks to GitHub's cache service v2:
@@ -94,6 +109,18 @@ Fit: GitHub-hosted labels map to an OS and architecture (`ubuntu-*-arm` is arm64
 **Isolation.** Each job gets its own listener on a random localhost port, bound to the job's repo and closed when the job ends. Upload and download URLs are HMAC-signed per listener. Branch scoping comes from the `ac` claim of the job's `ACTIONS_RUNTIME_TOKEN`: the write scope is the job's ref, and the extra read scopes are, for example, a PR's base branch. Lookup order matches GitHub's: own ref first, then exact key, key prefix, and restore-key prefixes, newest first.
 
 **Pointing jobs at it.** The runner's worker sets `ACTIONS_RESULTS_URL` for every step, overwriting the environment. spareci keeps a second copy of the runner install in which the worker's UTF-16 string `ACTIONS_RESULTS_URL` is renamed to `ACTIONS_RESULTS_ORL` (same length). The worker then sets the renamed variable, and the value spareci puts in the runner's environment reaches the job. Other self-hosted cache servers use the same patch. If a runner release changes that string, the patch fails, spareci logs it and jobs use GitHub's cache. The unpatched install is used for `--cache=false`.
+
+## Estimate
+
+`spareci estimate` lists runs with `GET /repos/{repo}/actions/runs?created=FROM..TO`, then each run's jobs with `GET .../runs/{id}/jobs?filter=all`, so re-run attempts count too. GitHub returns at most 1,000 runs for a filtered listing, so a busier window is split in half until each part fits. The run-timing endpoint is no use here: it now reports 0 ms for every job.
+
+Each job that got a runner and finished is billed `ceil(completed_at - started_at)` minutes, at least 1. Jobs with no runner (skipped, or failed before starting) cost nothing. Where a job ran:
+
+- **Self-hosted**: a `self-hosted` label, or a runner not named `GitHub Actions N` outside runner group 0.
+- **Larger runner**: a label giving the size (`ubuntu-8-core`, `windows-arm-16core`). The API doesn't report a larger runner's machine size on the job, so other names are shown unpriced.
+- **Standard runner**: a GitHub image label (`ubuntu-24.04`, `macos-15`, `windows-11-arm`, `macos-15-xlarge`, ...). The API sometimes returns a null runner group for these.
+
+It checks `GET /rate_limit` before fetching jobs (one request per run) and stops if that would leave fewer than 100 calls. Requests go through the client's ETag cache and up to four run at once; a 5xx on a jobs request is retried twice.
 
 ## Testing
 

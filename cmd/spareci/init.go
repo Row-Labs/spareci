@@ -207,17 +207,6 @@ func confirm(q string) bool {
 	return a == "" || a == "y" || a == "yes"
 }
 
-// isTerminal is a dependency-free check: a character device other than
-// /dev/null (which is one too).
-func isTerminal(f *os.File) bool {
-	st, err := f.Stat()
-	if err != nil || st.Mode()&os.ModeCharDevice == 0 {
-		return false
-	}
-	null, err := os.Stat(os.DevNull)
-	return err != nil || !os.SameFile(st, null)
-}
-
 // openPR commits the changes on a new branch off HEAD, pushes it and opens a
 // pull request into base. HEAD must match origin's base, so the pull request
 // holds only this commit.
