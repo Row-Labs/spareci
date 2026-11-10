@@ -67,6 +67,7 @@ Per-job VM isolation (Tart on macOS, containers or microVMs on Linux) is the nex
 
 ## Limits
 
+- Jobs share your home directory, so tools' own caches (`~/go`, `~/.npm`, `~/.cargo`, ...) are your personal ones, and `setup-*` actions will cache them. A separate job home is part of the isolation work.
 - One repo per `spareci up` process.
 - Jobs using `container:` or Docker container actions can't reach the local cache yet; they fall back to GitHub's cache.
 - If spareci is killed without `^C` (crash, power loss), the routing variable stays set and jobs queue until you run `spareci down` or start it again. A background service with crash-safe routing is planned.
