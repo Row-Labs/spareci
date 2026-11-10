@@ -52,6 +52,8 @@ func main() {
 		err = status(os.Args[2:])
 	case "down":
 		err = down(os.Args[2:])
+	case "init":
+		err = initCmd(os.Args[2:])
 	case "cache":
 		err = cacheCmd(os.Args[2:])
 	case "version", "--version":

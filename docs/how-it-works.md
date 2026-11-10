@@ -9,6 +9,7 @@
 | `internal/pool` | Poll loop: decides how many runners to start and drains on shutdown |
 | `internal/runner` | Installs `actions/runner`, clones it per job, runs it, patches the worker for the cache |
 | `internal/cache` | Local implementation of GitHub's cache service |
+| `internal/workflows` | `spareci init`: finds jobs' `runs-on`, judges which suit this machine, rewrites the chosen lines in place |
 
 ## Job lifecycle
 
@@ -19,6 +20,12 @@
 5. The clone is deleted. If the runner never got a job, its registration is deleted too.
 
 Routing: on start, spareci sets the repo variable `SPARECI_RUNS_ON` to its label, so `runs-on: ${{ vars.SPARECI_RUNS_ON || 'ubuntu-24.04' }}` resolves to this machine. On `^C`, it deletes the variable first, so new jobs go to GitHub, then waits for running jobs.
+
+## spareci init
+
+`internal/workflows` parses each workflow with `go.yaml.in/yaml/v3` only to find where each job's `runs-on` key and value sit (line and column). The rewrite is a text edit of those lines, so comments, quoting and everything else in the file stay byte for byte. A double-quoted value stays double-quoted; a block list (`- label` per line) is folded onto the `runs-on:` line. Anything that isn't a plain label or list of labels is skipped with a reason rather than guessed at.
+
+Fit: GitHub-hosted labels map to an OS and architecture (`ubuntu-*-arm` is arm64, `macos-13` and `*-intel`/`*-large` are x64, other `macos-14+` are arm64). Same OS and architecture is recommended; another architecture, a Linux job on a Mac or an unknown label can be chosen by name; Windows, macOS on Linux and container jobs on macOS can't.
 
 ## Local cache
 
@@ -39,6 +46,6 @@ Routing: on start, spareci sets the repo variable `SPARECI_RUNS_ON` to its label
 
 ## Testing
 
-- `go test -short ./...`: unit tests, including the cache protocol over HTTP.
+- `go test -short ./...`: unit tests, including the cache protocol over HTTP and `init`'s rewrites (table tests over real workflows in `internal/workflows/testdata`).
 - `go test ./...` with `npm ci --prefix test/compat` done first: also runs the real `@actions/cache` npm client against the server (`test/compat/compat.mjs`), covering both upload paths, restore keys, misses and immutability.
 - CI (`.github/workflows/ci.yml`) runs on spareci when it's up, and on GitHub-hosted runners otherwise. Its `cache-save` → `cache-restore` jobs check a real save and restore through `actions/cache`, plus artifact pass-through. On self-hosted runners they also assert that the cache really was local.

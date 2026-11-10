@@ -1,0 +1,78 @@
+name: CI
+
+# Pull requests and manual runs. Most jobs are Linux; the iOS build needs a Mac
+# and only runs when the app changed.
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Which paths changed (no checkout needed).
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    outputs:
+      app: ${{ steps.filter.outputs.app }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            app:
+              - "app/**"
+              - "lib/**"
+
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+
+  # Split across runners: same billed minutes, less waiting.
+  tests:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v5
+      - run: npm ci
+      - name: Tests (slice ${{ matrix.shard }} of 4)
+        run: npm test -- --shard=${{ matrix.shard }}/4
+
+  # Every OS, so its runs-on comes from the matrix.
+  smoke:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: ./scripts/smoke.sh
+
+  ios:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.app == 'true') }}
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - run: npm ci
+      - name: Build for the simulator
+        working-directory: app
+        run: xcodebuild -scheme Example -sdk iphonesimulator build

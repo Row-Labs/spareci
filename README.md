@@ -11,7 +11,7 @@ spareci up --repo owner/name
 runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }}
 ```
 
-While `spareci up` is running, that job runs on your machine for free. Stop it, and the same job runs on GitHub-hosted runners again. CI never sits waiting on a laptop that's asleep.
+`spareci init` makes that change for the jobs you pick and opens a pull request. While `spareci up` is running, those jobs run on your machine for free. Stop it, and they run on GitHub-hosted runners again. CI never sits waiting on a laptop that's asleep.
 
 > **Status: early.** Jobs run directly on the host as your user (see [Security](#security)). Use it for private repos whose workflows you trust.
 
@@ -30,6 +30,32 @@ go install github.com/Row-Labs/spareci/cmd/spareci@latest
 ```
 
 Prebuilt binaries and Homebrew are coming.
+
+## Set up a repo
+
+```sh
+cd your-repo
+spareci init
+```
+
+`init` lists every job in `.github/workflows`, recommends the ones this machine can take (same OS and architecture; macOS jobs need a Mac), and asks which to convert. It rewrites only those jobs' `runs-on` lines, shows the diff, then commits to a new branch, pushes it and opens a pull request. Nothing changes for anyone until spareci is running.
+
+```sh
+spareci init --dry-run                          # show the diff, change nothing
+spareci init --all-compatible                   # no prompt: every recommended job
+spareci init --jobs ci:build,release:macos      # no prompt: these jobs (workflow file name:job id)
+```
+
+Without a terminal, pass `--jobs` or `--all-compatible`. The pull request goes into the branch you're on (`--base` to change it), which must match what's on GitHub.
+
+What it converts:
+
+| `runs-on` | Becomes |
+|---|---|
+| `macos-15` | `${{ vars.SPARECI_RUNS_ON \|\| 'macos-15' }}` |
+| `[self-hosted, macOS, ARM64]` | `${{ vars.SPARECI_RUNS_ON \|\| fromJSON('["self-hosted","macOS","ARM64"]') }}` |
+
+A list keeps every label in its fallback, since a self-hosted runner has to carry them all. A self-hosted job is only offered if this machine has every label it asks for. `init` leaves alone, and says why: `runs-on` expressions (including `${{ matrix.os }}`; edit those by hand), runner groups, YAML aliases, reusable-workflow calls and jobs that are already converted. Jobs with `container:` or `services:` need Linux.
 
 ## Use
 
