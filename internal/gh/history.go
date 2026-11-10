@@ -19,11 +19,18 @@ func NewWith(token, base string, hc *http.Client) *Client {
 	return &Client{token: token, base: base, http: hc, etags: map[string]cached{}}
 }
 
-// Repo is the part of a repository spareci estimate needs.
+// Repo is the part of a repository spareci estimate and watchdog setup need.
 type Repo struct {
+	ID       int64  `json:"id"`
 	FullName string `json:"full_name"`
+	HTMLURL  string `json:"html_url"`
 	Private  bool   `json:"private"`
 	Archived bool   `json:"archived"`
+	Owner    struct {
+		ID    int64  `json:"id"`
+		Login string `json:"login"`
+		Type  string `json:"type"` // "User" or "Organization"
+	} `json:"owner"`
 }
 
 func (c *Client) Repo(ctx context.Context, repo string) (Repo, error) {

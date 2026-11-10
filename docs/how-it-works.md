@@ -9,6 +9,7 @@
 | `internal/gate` | Laptop mode: whether the machine takes jobs now (power, user idle time, hours) |
 | `internal/pool` | Poll loop: decides how many runners to start, applies `--max-wait`, drains on shutdown |
 | `internal/route` | Routing and heartbeat variables, sending queued jobs back to GitHub, the watchdog workflow |
+| `internal/ghapp` | `spareci watchdog --setup`: creates the watchdog's GitHub App through the manifest flow and stores its secrets |
 | `internal/service` | `spareci install`: launchd agent (macOS), systemd user unit (Linux) |
 | `internal/runner` | Installs `actions/runner`, clones it per job, runs it with the job's home and environment, patches the worker for the cache |
 | `internal/cache` | Local implementation of GitHub's cache service |
@@ -49,13 +50,13 @@ If the daemon dies without `^C`, nothing on the machine can clear the variable, 
 
 | | Hosted minutes | Time to recover | Setup for users |
 |---|---|---|---|
-| **Scheduled watchdog workflow, skipped by a lease (chosen)** | About 0 while healthy; 1 per outage | About 15 to 20 min, plus GitHub's cron delays | Commit one workflow, add one secret |
+| **Scheduled watchdog workflow, skipped by a lease (chosen)** | About 0 while healthy; 1 per outage | About 15 to 20 min, plus GitHub's cron delays | Commit one workflow, run `spareci watchdog --setup` |
 | Scheduled watchdog that runs every time | 1 per firing: about 8,600 a month at every 5 minutes, more than the free tier | Same | Same |
 | A routing job in front of every run (`needs: route`, hosted) | 1 per workflow run, every run | None | Edit every job in every workflow; about 15s added to every run |
 | External service (webhook, Cloudflare Worker) | 0 | Seconds | An account and a deployment, which spareci exists to avoid |
 | Only restart on crash (launchd/systemd) | 0 | Seconds after a crash; never if the machine is off or asleep | None |
 
-The chosen design keeps the one-line workflow change and costs nothing while things work. Its price is the recovery delay and a token secret. `spareci install` covers the common crash case in seconds anyway, and the watchdog covers a machine that's off.
+The chosen design keeps the one-line workflow change and costs nothing while things work. Its price is the recovery delay and a credential that can write variables (below). `spareci install` covers the common crash case in seconds anyway, and the watchdog covers a machine that's off.
 
 **How the lease works.** `spareci watchdog` prints a workflow with 12 cron firings an hour, at minutes 2, 7, ..., 57 (off the top of the hour, when GitHub's scheduler is busiest). GitHub passes the firing's cron string to the run as `github.event.schedule`. Every minute the daemon writes `SPARECI_HEARTBEAT` as `<unix time>|<cron>|<cron>|...|`, listing the firings from 30 minutes ago to 10 minutes ahead. The watchdog job's condition is:
 
@@ -63,9 +64,34 @@ The chosen design keeps the one-line workflow change and costs nothing while thi
 if: vars.SPARECI_RUNS_ON && !contains(vars.SPARECI_HEARTBEAT, format('|{0}|', github.event.schedule))
 ```
 
-so it's skipped, and isn't billed, whenever routing is off or the firing is listed. While the daemon is alive, every firing is listed unless GitHub starts it more than 30 minutes late. When the daemon dies, the list freezes and a firing at most 15 minutes later is unlisted. The job then checks the timestamp itself and only acts if it's at least 5 minutes old. When it acts, it deletes both variables with the `SPARECI_TOKEN` secret, then cancels and re-runs every run with a job queued for the routing label, using the rules above. The workflow's `GITHUB_TOKEN` (`actions: write`) is enough for that part. A daemon that comes back, for example a laptop waking up, sets both variables again on its next heartbeat.
+so it's skipped, and isn't billed, whenever routing is off or the firing is listed. While the daemon is alive, every firing is listed unless GitHub starts it more than 30 minutes late. When the daemon dies, the list freezes and a firing at most 15 minutes later is unlisted. The job then checks the timestamp itself and only acts if it's at least 5 minutes old. When it acts, it deletes both variables with the app token (or `SPARECI_TOKEN`, see below), then cancels and re-runs every run with a job queued for the routing label, using the rules above. The workflow's `GITHUB_TOKEN` (`actions: write`) is enough for that part. A daemon that comes back, for example a laptop waking up, sets both variables again on its next heartbeat.
 
 `workflow_dispatch` runs always reach the check, which is how to test it by hand. Verified live on 2026-11-10: with a 51-second-old heartbeat the watchdog left routing alone (run 42893719071). After a `kill -9` and a heartbeat more than 5 minutes old, it cleared routing and re-ran a run stranded on the dead machine (42895780440 rescuing 42894946226), which then passed on `ubuntu-24.04`. Those runs were dispatched by hand, because scheduled workflows only run from the default branch. The lease that picks which scheduled firings run is covered by unit tests.
+
+### Watchdog credentials
+
+The workflow's `GITHUB_TOKEN` can cancel and re-run, but GitHub doesn't give it any permission over repo variables, so deleting `SPARECI_RUNS_ON` needs another credential. Options considered:
+
+| | Expires | Hosted parts | Setup | Blast radius if the secret leaks |
+|---|---|---|---|---|
+| **(a) A private GitHub App per user, made from a manifest (chosen)** | Never; each run mints an hour-long token | None | `spareci watchdog --setup`: two browser clicks | Variables on the repos it's installed on |
+| (b) One shared public app plus a token broker | Never | A service that holds the app key and hands out tokens | Install the app | The broker holds a key for every user's repos |
+| (c) Fine-grained personal access token (fallback) | On the date the user picked; GitHub emails a warning, but nothing in the repo shows it | None | Make the token in Settings, then `gh secret set SPARECI_TOKEN` | Whatever the user ticked, as the user |
+
+(b) is the smoothest for users, but it means running a service with a key to everyone's repos, which is the thing spareci exists to avoid. (c) works and needs no new code, but a token that expires out of sight is exactly the failure a safety net can't have: the watchdog would fail on the one day it's needed. (a) costs one command and never expires.
+
+**How `--setup` works** (`internal/ghapp`):
+
+1. It listens on `127.0.0.1:<random port>` and opens the browser there. That page POSTs a [manifest](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest) to `github.com/settings/apps/new` (or `/organizations/<org>/settings/apps/new`, since a private app can only be installed on the account that owns it) with a random `state`. The manifest asks for Variables: write (key `actions_variables`) and nothing else, no webhook, not public.
+2. The user clicks Create. GitHub redirects to `127.0.0.1:<port>/created?code=...&state=...`. spareci checks `state` and exchanges the code (single use, valid for an hour) at `POST /app-manifests/{code}/conversions` for the app's client ID and private key.
+3. It stores them straight away as `SPARECI_APP_CLIENT_ID` and `SPARECI_APP_KEY`, because the key is returned only once. Secret values are sealed to the repo's public key (`GET .../actions/secrets/public-key`, a libsodium sealed box via `golang.org/x/crypto/nacl/box`) as GitHub requires, so the plaintext key goes from GitHub to this process to GitHub and is never written to disk.
+4. It redirects the browser to the app's install page with the account and repo preselected, and polls `GET /repos/{repo}/installation` with an app JWT until the user has installed it. GitHub has no API to create an installation, so this click is unavoidable.
+5. It mints an installation token and reads the repo's variables with it, so a broken setup fails here rather than during an outage.
+6. Run inside the repo, it writes `.github/workflows/spareci-watchdog.yml`.
+
+In the workflow, `actions/create-github-app-token` mints the token only when the heartbeat is stale. That step has `continue-on-error`, and the delete step uses `steps.app.outputs.token || secrets.SPARECI_TOKEN`, so a repo with only a PAT keeps working, and one with both falls back to the PAT if the app was uninstalled. Cancelling and re-running stay on `GITHUB_TOKEN`, so the app never needs Actions permissions.
+
+To remove it: delete the app under the account's Settings → Developer settings → GitHub Apps, then `gh secret delete SPARECI_APP_CLIENT_ID` and `gh secret delete SPARECI_APP_KEY`.
 
 ## Laptop mode
 

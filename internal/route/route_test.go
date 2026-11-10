@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Row-Labs/spareci/internal/gh"
+	"go.yaml.in/yaml/v3"
 )
 
 // fake is an in-memory repo: variables plus one run.
@@ -307,7 +308,11 @@ func TestWatchdogWorkflow(t *testing.T) {
 	}
 	for _, want := range []string{
 		"if: vars.SPARECI_RUNS_ON && !contains(vars.SPARECI_HEARTBEAT, format('|{0}|', github.event.schedule))",
-		"secrets.SPARECI_TOKEN",
+		"VAR_TOKEN: ${{ steps.app.outputs.token || secrets.SPARECI_TOKEN }}",
+		"uses: actions/create-github-app-token@v3",
+		"client-id: ${{ secrets.SPARECI_APP_CLIENT_ID }}",
+		"private-key: ${{ secrets.SPARECI_APP_KEY }}",
+		"if: steps.beat.outputs.stale == 'true' && env.HAS_APP == 'true'",
 		"actions/variables/SPARECI_RUNS_ON",
 		"rerun-failed-jobs",
 		"(( now - beat < 300 ))",
@@ -318,6 +323,21 @@ func TestWatchdogWorkflow(t *testing.T) {
 	}
 	if strings.Contains(w, "<%") || strings.Contains(w, "%>") {
 		t.Error("unexpanded template action")
+	}
+
+	// It's valid YAML, the app step comes before the step that uses its token,
+	// and a failed mint falls through to the SPARECI_TOKEN fallback.
+	var doc struct {
+		Jobs map[string]struct {
+			Steps []map[string]any `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(w), &doc); err != nil {
+		t.Fatalf("workflow isn't YAML: %v", err)
+	}
+	steps := doc.Jobs["watchdog"].Steps
+	if len(steps) != 3 || steps[0]["id"] != "beat" || steps[1]["id"] != "app" || steps[1]["continue-on-error"] != true {
+		t.Errorf("steps = %v", steps)
 	}
 }
 

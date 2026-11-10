@@ -197,13 +197,20 @@ A job never waits on this machine for long:
 - **Dead machine** (crash, `kill -9`, power cut, a laptop that went to sleep). Nothing on the machine can clean up, so a small workflow on GitHub does it. Add it once:
 
   ```sh
-  spareci watchdog > .github/workflows/spareci-watchdog.yml   # commit it to your default branch
-  gh secret set SPARECI_TOKEN   # paste a fine-grained token for this repo with "Variables: read and write"
+  cd your-repo
+  spareci watchdog --setup   # then commit .github/workflows/spareci-watchdog.yml to your default branch
   ```
 
-  While spareci is up it refreshes a heartbeat variable every minute. When the heartbeat is more than 5 minutes old, the watchdog clears the routing variable and re-runs jobs that were queued for this machine on GitHub-hosted runners. Expect that within about 15 to 20 minutes of the machine going away, longer if GitHub is slow to start scheduled workflows. While spareci is healthy, the watchdog's runs are skipped and use no Actions minutes.
+  `--setup` opens GitHub in your browser twice: once to create a private GitHub App with a single permission (Variables: read and write), once to install it on this repo. It stores the app's client ID and key as repo secrets. Each watchdog run mints a token from them that lasts an hour, so there's nothing to renew. For a repo in an organization, the app belongs to the organization, which needs an org owner (or app manager) to create it.
 
-  The token is needed because a workflow's own `GITHUB_TOKEN` can't change repo variables. When the machine comes back, spareci turns routing on again by itself.
+  While spareci is up it refreshes a heartbeat variable every minute. When the heartbeat is more than 5 minutes old, the watchdog clears the routing variable and re-runs jobs that were queued for this machine on GitHub-hosted runners. Expect that within about 15 to 20 minutes of the machine going away, longer if GitHub is slow to start scheduled workflows. While spareci is healthy, the watchdog's runs are skipped and use no Actions minutes. When the machine comes back, spareci turns routing on again by itself.
+
+  The app is needed because a workflow's own `GITHUB_TOKEN` can't change repo variables. If you'd rather not create an app, use a fine-grained personal access token instead (it expires, so set a reminder):
+
+  ```sh
+  spareci watchdog > .github/workflows/spareci-watchdog.yml
+  gh secret set SPARECI_TOKEN   # paste a fine-grained token for this repo with "Variables: read and write"
+  ```
 
 Sending a job back means cancelling its workflow run and re-running it, because GitHub reads `vars` once per run attempt. Usually only the cancelled jobs are re-run. If an earlier job in the run already finished on this machine, the whole run is re-run on GitHub, since that job's caches are on this machine where a GitHub-hosted job can't restore them. See [docs/how-it-works.md](docs/how-it-works.md#routing).
 
