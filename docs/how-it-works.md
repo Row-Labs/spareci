@@ -31,7 +31,7 @@ On start, spareci sets the repo variable `SPARECI_RUNS_ON` to its label, so `run
 1. Cancel the run, and force-cancel it if it hasn't completed after a minute (a job held by a runner that went away can block a normal cancel).
 2. Delete the routing variable if it's set, re-run, wait for the new attempt to exist, and set the variable again. Runs created in those few seconds also go to GitHub, which is the safe direction.
 3. Re-run only the failed and cancelled jobs, unless a job in the run already finished on this machine. Then re-run the whole run: that job saved its caches to the local cache, and a later job re-run on GitHub couldn't restore them. Artifacts don't need this, because they always go through GitHub.
-4. Check that the failed-jobs re-run really included every cancelled job. In run 42889578581, two jobs queued here were cancelled together and GitHub's failed-jobs re-run only included one of them, so the run ended as cancelled even though everything it re-ran passed. If that happens, spareci cancels the new attempt and re-runs the whole run.
+4. Check that the failed-jobs re-run really included every cancelled job. When two queued jobs in a run are cancelled together, GitHub's failed-jobs re-run often includes only one of them: it happened in 4 of 5 such runs on 2026-11-10 (for example 42889578581 and 42894946226). The skipped job is listed under the new attempt number but finished before that attempt started, and the run ends as cancelled even though everything it re-ran passed. If that happens, spareci (and the watchdog) cancels the new attempt and re-runs the whole run.
 
 This happens in three places:
 
@@ -61,7 +61,7 @@ if: vars.SPARECI_RUNS_ON && !contains(vars.SPARECI_HEARTBEAT, format('|{0}|', gi
 
 so it's skipped, and isn't billed, whenever routing is off or the firing is listed. While the daemon is alive, every firing is listed unless GitHub starts it more than 30 minutes late. When the daemon dies, the list freezes and a firing at most 15 minutes later is unlisted. The job then checks the timestamp itself and only acts if it's at least 5 minutes old. When it acts, it deletes both variables with the `SPARECI_TOKEN` secret, then cancels and re-runs every run with a job queued for the routing label, using the rules above. The workflow's `GITHUB_TOKEN` (`actions: write`) is enough for that part. A daemon that comes back, for example a laptop waking up, sets both variables again on its next heartbeat.
 
-`workflow_dispatch` runs always reach the check, which is how to test it by hand.
+`workflow_dispatch` runs always reach the check, which is how to test it by hand. Verified live on 2026-11-10: with a 51-second-old heartbeat the watchdog left routing alone (run 42893719071). After a `kill -9` and a heartbeat more than 5 minutes old, it cleared routing and re-ran a run stranded on the dead machine (42895780440 rescuing 42894946226), which then passed on `ubuntu-24.04`. Those runs were dispatched by hand, because scheduled workflows only run from the default branch. The lease that picks which scheduled firings run is covered by unit tests.
 
 ## Background service
 
