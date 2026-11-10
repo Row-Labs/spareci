@@ -1,0 +1,116 @@
+name: CI
+
+# Everything runs on Linux: macOS runners bill at 10x on a private repository.
+# The suite passes on Ubuntu (the hub ships for Linux too). Mac-only checks run
+# locally before pushing: `pnpm check:desktop` (the Tauri app's clippy and
+# tests; most of its Rust is macOS-only and does not compile elsewhere).
+# CI runs on pull requests and by hand rather than on every push to main.
+on:
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a pull request supersedes the run still going for it.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # Which paths the pull request touches (GitHub API, no checkout).
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    outputs:
+      mobile: ${{ steps.filter.outputs.mobile }}
+    steps:
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
+        id: filter
+        with:
+          filters: |
+            mobile:
+              - "apps/mobile/**"
+              - "packages/ui-native/**"
+              - "packages/client/**"
+              - "packages/protocol/**"
+              - "packages/design-tokens/**"
+              - "pnpm-lock.yaml"
+
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: node-pty spawn-helper is executable
+        run: pnpm check:node-pty
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: OpenAPI document is up to date
+        run: |
+          pnpm --filter @supervisor/protocol generate:openapi
+          git diff --exit-code -- packages/protocol/openapi.json
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Format
+        run: pnpm format:check
+
+      - name: Web build
+        if: hashFiles('apps/web/vite.config.ts') != ''
+        run: pnpm --filter @supervisor/web build
+
+  # The suite takes ~23 min on one 2-CPU runner (and more workers than CPUs
+  # breaks timing-sensitive tests), so it runs in parallel slices instead:
+  # about the same billed minutes, a fraction of the wait.
+  tests:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      # Includes the peercred native addon smoke test (built during install).
+      - name: Unit and contract tests (slice ${{ matrix.shard }} of 5)
+        run: pnpm test --shard=${{ matrix.shard }}/5
+
+  # Expo prebuild only when the app or what it is built from changed (or by hand).
+  # Runs whenever the path filter did not succeed (skipped on workflow_dispatch and
+  # any other event, or failed), so it is never skipped silently.
+  mobile:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.mobile == 'true') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Expo prebuild (iOS and Android)
+        working-directory: apps/mobile
+        run: npx expo prebuild --clean --no-install
