@@ -50,11 +50,28 @@ It reads your runs and jobs through the GitHub API and changes nothing. Each job
 
 Requires macOS or Linux (arm64 or x64), the [`gh` CLI](https://cli.github.com) logged in, and admin rights on the repo (registering runners needs them).
 
+> These commands work once the repo is public. Until then, build from a clone (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+
+Homebrew (macOS and Linux):
+
+```sh
+brew install row-labs/tap/spareci
+```
+
+Or download a prebuilt binary from the [latest release](https://github.com/Row-Labs/spareci/releases/latest). Pick `darwin` or `linux` and `arm64` or `amd64`:
+
+```sh
+curl -fsSL https://github.com/Row-Labs/spareci/releases/latest/download/spareci_darwin_arm64.tar.gz | tar xz spareci
+sudo mv spareci /usr/local/bin/
+```
+
+Or with Go:
+
 ```sh
 go install github.com/Row-Labs/spareci/cmd/spareci@latest
 ```
 
-Prebuilt binaries and Homebrew are coming.
+Check it with `spareci version`.
 
 ## Set up a repo
 
@@ -174,4 +191,8 @@ By default (`--job-home=spareci`) each repo's jobs get a persistent home of thei
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Releases are cut as described in [docs/releasing.md](docs/releasing.md).
+
+## License
+
+[MIT](LICENSE)
