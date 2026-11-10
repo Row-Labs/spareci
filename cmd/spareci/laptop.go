@@ -32,19 +32,28 @@ func laptopFlags(fs *flag.FlagSet) *laptopOpts {
 	return o
 }
 
-// gate builds the gate, or returns nil when no condition is set. It fails
-// when a condition can't be measured on this machine.
-func (o *laptopOpts) gate(repo string) (*gate.Gate, error) {
+// config checks the flags.
+func (o *laptopOpts) config() (gate.Config, error) {
 	cfg := gate.Config{OnlyOnAC: o.onlyOnAC, Idle: o.idle}
 	if o.idle < 0 {
-		return nil, fmt.Errorf("--idle must be positive")
+		return cfg, fmt.Errorf("--idle must be positive")
 	}
 	if o.hours != "" {
 		w, err := gate.ParseWindow(o.hours)
 		if err != nil {
-			return nil, err
+			return cfg, err
 		}
 		cfg.Hours = &w
+	}
+	return cfg, nil
+}
+
+// gate builds the gate, or returns nil when no condition is set. It fails
+// when a condition can't be measured on this machine.
+func (o *laptopOpts) gate(repo string) (*gate.Gate, error) {
+	cfg, err := o.config()
+	if err != nil {
+		return nil, err
 	}
 	if !cfg.Enabled() {
 		return nil, nil

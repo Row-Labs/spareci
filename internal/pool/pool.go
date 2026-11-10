@@ -4,6 +4,7 @@ package pool
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,19 +14,20 @@ import (
 
 	"github.com/Row-Labs/spareci/internal/cache"
 	"github.com/Row-Labs/spareci/internal/gh"
+	"github.com/Row-Labs/spareci/internal/route"
 	"github.com/Row-Labs/spareci/internal/runner"
 )
 
 type Config struct {
-	Repo        string
-	Labels      []string // every label the runners carry; a job matches if all its labels are here
-	Max         int      // concurrent runners
-	Interval    time.Duration
-	FallbackVar string // repo variable set to Labels' routing label while up; "" disables
-	RouteLabel  string // value written to FallbackVar
-	DryRun      bool
-	Cache       *cache.Server // nil: jobs use GitHub's cache service
-	Gate        Gate          // nil: always take jobs; see gate.go
+	Repo     string
+	Labels   []string // every label the runners carry; a job matches if all its labels are here
+	Max      int      // concurrent runners
+	Interval time.Duration
+	Router   *route.Router // routing variable and heartbeat; nil disables routing
+	MaxWait  time.Duration // a job queued here longer than this goes to GitHub-hosted runners; 0 disables
+	DryRun   bool
+	Cache    *cache.Server // nil: jobs use GitHub's cache service
+	Gate     Gate          // nil: always take jobs; see gate.go
 }
 
 type Pool struct {
@@ -56,13 +58,16 @@ func New(cfg Config, client *gh.Client, host *runner.Host) *Pool {
 }
 
 // Matches reports whether a job's runs-on labels are all ones we carry.
+func (p *Pool) Matches(j gh.Job) bool { return Matches(p.cfg.Labels, j) }
+
+// Matches reports whether a job's runs-on labels are all in labels.
 // Runner label matching on GitHub is case-insensitive.
-func (p *Pool) Matches(j gh.Job) bool {
+func Matches(labels []string, j gh.Job) bool {
 	if len(j.Labels) == 0 {
 		return false
 	}
 	have := map[string]bool{}
-	for _, l := range p.cfg.Labels {
+	for _, l := range labels {
 		have[strings.ToLower(l)] = true
 	}
 	for _, l := range j.Labels {
@@ -76,14 +81,17 @@ func (p *Pool) Matches(j gh.Job) bool {
 // Run polls until ctx is cancelled (stop taking work; finish running jobs)
 // and then until hardCtx is cancelled or every job is done.
 func (p *Pool) Run(ctx, hardCtx context.Context) error {
-	if p.cfg.Gate != nil && !p.cfg.Gate.Check().Open {
-		p.routed = true // may be left over from a crash; the first poll clears it
-	} else if p.cfg.FallbackVar != "" && !p.cfg.DryRun {
-		p.routed = true
-		if err := p.gh.SetVariable(hardCtx, p.cfg.Repo, p.cfg.FallbackVar, p.cfg.RouteLabel); err != nil {
-			return fmt.Errorf("set fallback variable %s: %w", p.cfg.FallbackVar, err)
+	if r := p.cfg.Router; r != nil && !p.cfg.DryRun {
+		if p.cfg.Gate != nil && !p.cfg.Gate.Check().Open {
+			p.routed = true // may be left over from a crash; the first poll clears it
+		} else {
+			if err := r.Start(hardCtx); err != nil {
+				return err
+			}
+			p.routed = true
+			slog.Info("routing on", "variable", r.Var, "value", r.Value, "heartbeat", r.HeartbeatVar)
 		}
-		slog.Info("routing on", "variable", p.cfg.FallbackVar, "value", p.cfg.RouteLabel)
+		go r.Beat(ctx)
 	}
 
 	t := time.NewTicker(p.cfg.Interval)
@@ -111,7 +119,7 @@ func (p *Pool) tick(ctx, hardCtx context.Context) error {
 			mine = append(mine, j)
 		}
 	}
-	if !p.admit(ctx, len(mine)) {
+	if !p.admit(ctx, mine) {
 		return nil
 	}
 
@@ -164,15 +172,73 @@ func (p *Pool) tick(ctx, hardCtx context.Context) error {
 			return err
 		}
 	}
+	// Jobs left over after this tick's spawns wait for a free slot. Past
+	// MaxWait, send them to GitHub-hosted runners instead.
+	if len(mine) > waiting+max(n, 0) {
+		p.rescue(ctx, Overdue(mine, p.cfg.MaxWait, now), false, "waited longer than --max-wait")
+	}
 	return nil
 }
 
-func (p *Pool) spawn(ctx, hardCtx context.Context) error {
+// Overdue is the runs with a job that has been queued longer than maxWait.
+func Overdue(jobs []gh.Job, maxWait time.Duration, now time.Time) []int64 {
+	if maxWait <= 0 {
+		return nil
+	}
+	var late []gh.Job
+	for _, j := range jobs {
+		if !j.CreatedAt.IsZero() && now.Sub(j.CreatedAt) > maxWait {
+			late = append(late, j)
+		}
+	}
+	return runIDs(late)
+}
+
+func runIDs(jobs []gh.Job) []int64 {
+	var runs []int64
+	seen := map[int64]bool{}
+	for _, j := range jobs {
+		if !seen[j.RunID] {
+			seen[j.RunID] = true
+			runs = append(runs, j.RunID)
+		}
+	}
+	return runs
+}
+
+// rescue sends runs' queued jobs to GitHub-hosted runners in the background.
+func (p *Pool) rescue(ctx context.Context, runs []int64, force bool, why string) {
+	r := p.cfg.Router
+	// Without the routing variable a re-run would come straight back here.
+	if r == nil || r.Var == "" || p.cfg.DryRun {
+		return
+	}
+	for _, id := range runs {
+		go func() {
+			err := r.Rescue(ctx, id, force)
+			switch {
+			case errors.Is(err, route.ErrRescuing):
+			case errors.Is(err, route.ErrBusy):
+				slog.Debug("not rescuing run yet: a job in it is running", "run", id)
+			case err != nil:
+				slog.Warn("could not send run to GitHub-hosted runners", "run", id, "err", err)
+			default:
+				slog.Info("sent queued jobs to GitHub-hosted runners", "run", id, "why", why)
+			}
+		}()
+	}
+}
+
+// RunnerPrefix starts the name of every runner this machine registers.
+func RunnerPrefix() string {
 	host, _ := os.Hostname()
-	host = strings.Split(host, ".")[0]
+	return "spareci-" + strings.Split(host, ".")[0] + "-"
+}
+
+func (p *Pool) spawn(ctx, hardCtx context.Context) error {
 	p.mu.Lock()
 	p.seq++
-	name := fmt.Sprintf("spareci-%s-%d-%d", host, time.Now().Unix(), p.seq)
+	name := fmt.Sprintf("%s%d-%d", RunnerPrefix(), time.Now().Unix(), p.seq)
 	p.mu.Unlock()
 
 	jit, err := p.gh.GenerateJIT(ctx, p.cfg.Repo, name, p.cfg.Labels)
@@ -226,15 +292,58 @@ func (p *Pool) spawn(ctx, hardCtx context.Context) error {
 	return nil
 }
 
-// drain turns routing off so new jobs go to GitHub-hosted runners, cancels
-// runners that have no job, and waits for the rest to finish.
-func (p *Pool) drain(hardCtx context.Context) error {
-	if p.cfg.FallbackVar != "" && !p.cfg.DryRun {
-		if err := p.gh.DeleteVariable(context.Background(), p.cfg.Repo, p.cfg.FallbackVar); err != nil {
-			slog.Warn("could not clear fallback variable; jobs will queue for this machine", "variable", p.cfg.FallbackVar, "err", err)
-		} else {
-			slog.Info("routing off: new jobs go to GitHub-hosted runners", "variable", p.cfg.FallbackVar)
+// rescueQueued sends every job still queued for this machine to
+// GitHub-hosted runners, since no runner here will take it.
+func (p *Pool) rescueQueued() {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if p.cfg.Router.Var == "" {
+		return
+	}
+	n, err := RescueQueued(ctx, p.gh, p.cfg.Router, p.Matches)
+	if n > 0 || err != nil {
+		slog.Info("sent queued jobs to GitHub-hosted runners", "runs", n, "err", err)
+	}
+}
+
+// RescueQueued cancels and re-runs every run with a queued job that match
+// accepts, so those jobs go to GitHub-hosted runners. Routing must be off.
+func RescueQueued(ctx context.Context, client *gh.Client, r *route.Router, match func(gh.Job) bool) (int, error) {
+	jobs, err := client.QueuedJobs(ctx, r.Repo)
+	if err != nil {
+		return 0, err
+	}
+	var mine []gh.Job
+	for _, j := range jobs {
+		if match(j) {
+			mine = append(mine, j)
 		}
+	}
+	runs := runIDs(mine)
+	var wg sync.WaitGroup
+	errs := make([]error, len(runs))
+	for i, id := range runs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = r.Rescue(ctx, id, true)
+		}()
+	}
+	wg.Wait()
+	return len(runs), errors.Join(errs...)
+}
+
+// drain turns routing off so new jobs go to GitHub-hosted runners, cancels
+// runners that have no job, waits for the rest to finish, and then sends jobs
+// still queued here to GitHub-hosted runners.
+func (p *Pool) drain(hardCtx context.Context) error {
+	if r := p.cfg.Router; r != nil && !p.cfg.DryRun {
+		if err := r.Stop(context.Background()); err != nil {
+			slog.Warn("could not clear routing; jobs will queue for this machine until `spareci down`", "variable", r.Var, "err", err)
+		} else {
+			slog.Info("routing off: new jobs go to GitHub-hosted runners", "variable", r.Var)
+		}
+		defer p.rescueQueued()
 	}
 	for {
 		p.mu.Lock()
