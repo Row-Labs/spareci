@@ -62,6 +62,12 @@ func New() (*Client, error) {
 	}, nil
 }
 
+// NewWithBase talks to base (e.g. a GitHub Enterprise API or a test server)
+// with the given token.
+func NewWithBase(base, token string) *Client {
+	return &Client{token: token, base: strings.TrimSuffix(base, "/"), http: &http.Client{Timeout: 30 * time.Second}, etags: map[string]cached{}}
+}
+
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
 	var body io.Reader
 	if in != nil {

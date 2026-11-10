@@ -115,6 +115,33 @@ spareci estimate           # what your Actions minutes cost, and what this machi
 
 Press `^C` once and spareci routes new jobs back to GitHub, lets running jobs finish, and then sends any job still queued for this machine to GitHub-hosted runners. Press it twice and running jobs are aborted.
 
+### Laptop mode
+
+On a machine you also work on, tell spareci when it may take jobs:
+
+```sh
+spareci up --only-on-ac            # not on battery
+spareci up --idle 10m              # only after 10 minutes without keyboard or mouse input
+spareci up --hours 18:00-08:00     # only in this local-time window (may cross midnight)
+spareci up --only-on-ac --idle 5m --hours 18:00-08:00   # all must hold
+```
+
+When a condition stops holding, spareci pauses. It does what `^C` does, but keeps running:
+
+- It clears `SPARECI_RUNS_ON` (and the heartbeat), so new jobs go to GitHub-hosted runners.
+- It stops runners that haven't picked up a job. Running jobs finish.
+- Jobs already queued for this machine are sent to GitHub-hosted runners, as described [below](#when-this-machine-goes-away). A run with a job still in progress waits until that job ends, so pausing never throws away work.
+
+When the conditions hold again, it routes jobs here again. Each change is logged, and `spareci status` shows whether the machine is taking jobs or paused, and why. Flags work with `spareci install` too.
+
+| | macOS | Linux |
+|---|---|---|
+| `--only-on-ac` | `pmset` | `/sys/class/power_supply`; a machine with no battery counts as on AC |
+| `--idle` | `HIDIdleTime` (any keyboard, mouse or trackpad input) | best effort: GNOME's idle monitor, then `xprintidle` (X11), then logind's idle hint. Needs your desktop session, so it may not work from a systemd user service. |
+| `--hours` | local clock | local clock |
+
+If this machine can't measure a condition you asked for, `spareci up` says so and exits instead of ignoring it.
+
 Route only the jobs you want. A job is sent here when its `runs-on` labels are all ones this machine has: `self-hosted`, the OS (`macOS` or `Linux`), the arch (`ARM64` or `X64`) and `spareci` (change it with `--label`). The `vars.SPARECI_RUNS_ON || ...` form is what gives you the fallback, and spareci sets and clears that variable for you.
 
 ### Run it in the background

@@ -27,6 +27,7 @@ type Config struct {
 	MaxWait  time.Duration // a job queued here longer than this goes to GitHub-hosted runners; 0 disables
 	DryRun   bool
 	Cache    *cache.Server // nil: jobs use GitHub's cache service
+	Gate     Gate          // nil: always take jobs; see gate.go
 }
 
 type Pool struct {
@@ -37,6 +38,10 @@ type Pool struct {
 	mu      sync.Mutex
 	workers map[string]*worker
 	seq     int
+
+	// Laptop mode (gate.go); only touched by the poll loop.
+	paused, routed bool
+	stranded       int
 }
 
 type worker struct {
@@ -77,10 +82,15 @@ func Matches(labels []string, j gh.Job) bool {
 // and then until hardCtx is cancelled or every job is done.
 func (p *Pool) Run(ctx, hardCtx context.Context) error {
 	if r := p.cfg.Router; r != nil && !p.cfg.DryRun {
-		if err := r.Start(hardCtx); err != nil {
-			return err
+		if p.cfg.Gate != nil && !p.cfg.Gate.Check().Open {
+			p.routed = true // may be left over from a crash; the first poll clears it
+		} else {
+			if err := r.Start(hardCtx); err != nil {
+				return err
+			}
+			p.routed = true
+			slog.Info("routing on", "variable", r.Var, "value", r.Value, "heartbeat", r.HeartbeatVar)
 		}
-		slog.Info("routing on", "variable", r.Var, "value", r.Value, "heartbeat", r.HeartbeatVar)
 		go r.Beat(ctx)
 	}
 
@@ -108,6 +118,9 @@ func (p *Pool) tick(ctx, hardCtx context.Context) error {
 		if p.Matches(j) {
 			mine = append(mine, j)
 		}
+	}
+	if !p.admit(ctx, mine) {
+		return nil
 	}
 
 	p.mu.Lock()
@@ -162,7 +175,7 @@ func (p *Pool) tick(ctx, hardCtx context.Context) error {
 	// Jobs left over after this tick's spawns wait for a free slot. Past
 	// MaxWait, send them to GitHub-hosted runners instead.
 	if len(mine) > waiting+max(n, 0) {
-		p.rescue(ctx, Overdue(mine, p.cfg.MaxWait, now), false)
+		p.rescue(ctx, Overdue(mine, p.cfg.MaxWait, now), false, "waited longer than --max-wait")
 	}
 	return nil
 }
@@ -194,7 +207,7 @@ func runIDs(jobs []gh.Job) []int64 {
 }
 
 // rescue sends runs' queued jobs to GitHub-hosted runners in the background.
-func (p *Pool) rescue(ctx context.Context, runs []int64, force bool) {
+func (p *Pool) rescue(ctx context.Context, runs []int64, force bool, why string) {
 	r := p.cfg.Router
 	// Without the routing variable a re-run would come straight back here.
 	if r == nil || r.Var == "" || p.cfg.DryRun {
@@ -210,7 +223,7 @@ func (p *Pool) rescue(ctx context.Context, runs []int64, force bool) {
 			case err != nil:
 				slog.Warn("could not send run to GitHub-hosted runners", "run", id, "err", err)
 			default:
-				slog.Info("sent queued jobs to GitHub-hosted runners", "run", id, "max_wait", p.cfg.MaxWait)
+				slog.Info("sent queued jobs to GitHub-hosted runners", "run", id, "why", why)
 			}
 		}()
 	}

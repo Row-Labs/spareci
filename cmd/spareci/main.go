@@ -36,6 +36,7 @@ Usage:
   spareci up        [--repo owner/name] [--label spareci] [--max 1] [--max-wait 10m]
                     [--dry-run] [--cache=true] [--cache-size 10GB]
                     [--job-home spareci|user|PATH]
+                    [--only-on-ac] [--idle 10m] [--hours 18:00-08:00]
   spareci install   [--repo owner/name] [up flags]   run "up" in the background, at login
   spareci uninstall [--repo owner/name]
   spareci logs      [--repo owner/name] [-f] [-n 50]
@@ -137,6 +138,7 @@ type upOpts struct {
 	cacheSize *string
 	upstream  *string
 	jobHome   *string
+	laptop    *laptopOpts
 }
 
 // upFlags defines up's flags; install checks its pass-through flags with it.
@@ -153,6 +155,7 @@ func upFlags(fs *flag.FlagSet) *upOpts {
 		cacheSize: fs.String("cache-size", "10GB", "local cache size before least recently used entries are evicted"),
 		upstream:  fs.String("cache-upstream", cache.DefaultUpstream, "GitHub results service, for calls the local cache passes through (artifacts)"),
 		jobHome:   fs.String("job-home", runner.HomeSpareci, `HOME for jobs: "spareci" (a separate home per repo), "user" (your own home and environment), or a path`),
+		laptop:    laptopFlags(fs),
 	}
 }
 
@@ -167,6 +170,10 @@ func up(args []string) error {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
 	if err := c.resolve(); err != nil {
+		return err
+	}
+	g, err := o.laptop.gate(c.repo)
+	if err != nil {
 		return err
 	}
 	client, err := gh.New()
@@ -223,7 +230,12 @@ func up(args []string) error {
 		MaxWait:  *maxWait,
 		DryRun:   *dry,
 		Cache:    cacheSrv,
+		Gate:     poolGate(g),
 	}, client, host)
+	if g != nil {
+		slog.Info("laptop mode: taking jobs only when conditions are met", "when", g.Config().String())
+		defer removeGateState(c.repo)
+	}
 	return p.Run(soft, hard)
 }
 
@@ -244,6 +256,7 @@ func status(args []string) error {
 		return err
 	}
 	fmt.Printf("repo: %s\n", c.repo)
+	printGateState(c.repo)
 	fmt.Printf("self-hosted runners: %d\n", len(runners))
 	for _, r := range runners {
 		fmt.Printf("  %-40s %-8s busy=%v\n", r.Name, r.Status, r.Busy)
@@ -374,8 +387,11 @@ func install(args []string) error {
 	}
 	// Check the flags now rather than in a restart loop.
 	check := flag.NewFlagSet("up", flag.ContinueOnError)
-	upFlags(check)
+	checked := upFlags(check)
 	if err := check.Parse(rest); err != nil {
+		return err
+	}
+	if _, err := checked.laptop.config(); err != nil {
 		return err
 	}
 	if err := c.resolve(); err != nil {

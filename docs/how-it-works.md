@@ -6,6 +6,7 @@
 |---|---|
 | `cmd/spareci` | CLI: flags, signals, wiring |
 | `internal/gh` | The few GitHub REST calls needed: queued jobs, JIT runners, repo variables, run history |
+| `internal/gate` | Laptop mode: whether the machine takes jobs now (power, user idle time, hours) |
 | `internal/pool` | Poll loop: decides how many runners to start, applies `--max-wait`, drains on shutdown |
 | `internal/route` | Routing and heartbeat variables, sending queued jobs back to GitHub, the watchdog workflow |
 | `internal/service` | `spareci install`: launchd agent (macOS), systemd user unit (Linux) |
@@ -64,6 +65,20 @@ if: vars.SPARECI_RUNS_ON && !contains(vars.SPARECI_HEARTBEAT, format('|{0}|', gi
 so it's skipped, and isn't billed, whenever routing is off or the firing is listed. While the daemon is alive, every firing is listed unless GitHub starts it more than 30 minutes late. When the daemon dies, the list freezes and a firing at most 15 minutes later is unlisted. The job then checks the timestamp itself and only acts if it's at least 5 minutes old. When it acts, it deletes both variables with the `SPARECI_TOKEN` secret, then cancels and re-runs every run with a job queued for the routing label, using the rules above. The workflow's `GITHUB_TOKEN` (`actions: write`) is enough for that part. A daemon that comes back, for example a laptop waking up, sets both variables again on its next heartbeat.
 
 `workflow_dispatch` runs always reach the check, which is how to test it by hand. Verified live on 2026-11-10: with a 51-second-old heartbeat the watchdog left routing alone (run 42893719071). After a `kill -9` and a heartbeat more than 5 minutes old, it cleared routing and re-ran a run stranded on the dead machine (42895780440 rescuing 42894946226), which then passed on `ubuntu-24.04`. Those runs were dispatched by hand, because scheduled workflows only run from the default branch. The lease that picks which scheduled firings run is covered by unit tests.
+
+## Laptop mode
+
+`internal/gate` turns `--only-on-ac`, `--idle` and `--hours` into one open/closed answer. Probes (power source, idle time, clock) are plain functions, so the logic is tested with fakes; `probes_darwin.go` and `probes_linux.go` hold the real ones, and the output parsers are tested on every OS.
+
+The pool asks the gate once per poll, before spawning (`internal/pool/gate.go`):
+
+- **Open → closed:** `Router.Stop` deletes the routing variable and the heartbeat. Runners that haven't started a job are cancelled, and none are spawned. Running jobs continue. Each poll while closed, runs with a job queued here are sent back with `Router.Rescue` (not forced), so a run with a job in progress waits for it, like `--max-wait`.
+- **Closed → open:** `Router.Start` sets the routing variable and heartbeat again, and spawning resumes.
+- **Watchdog:** routing and the heartbeat go off together, exactly as after `^C`. The watchdog's `if:` needs `vars.SPARECI_RUNS_ON`, so it's skipped while paused, and there is nothing for it to rescue. The heartbeat loop only writes while the router is on, so it can't turn routing back on during a pause.
+- A failed routing change is retried on the next poll, and runs aren't rescued until routing is really off (a re-run made while it's on would come straight back). A probe that fails mid-run keeps its last reading, with one warning; at start, `spareci up` refuses a condition it can't measure.
+- If the gate is closed at start, routing isn't started, and it's stopped instead in case a crash left it on.
+
+The up process writes the gate's state to `<cache dir>/spareci/state/<owner>_<repo>.gate.json`, which `spareci status` reads while that process is alive.
 
 ## Background service
 
