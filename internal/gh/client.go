@@ -62,6 +62,9 @@ func New() (*Client, error) {
 	}, nil
 }
 
+// Token is the token the client authenticates with.
+func (c *Client) Token() string { return c.token }
+
 // NewWithBase talks to base (e.g. a GitHub Enterprise API or a test server)
 // with the given token.
 func NewWithBase(base, token string) *Client {

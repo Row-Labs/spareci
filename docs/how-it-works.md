@@ -12,6 +12,7 @@
 | `internal/service` | `spareci install`: launchd agent (macOS), systemd user unit (Linux) |
 | `internal/runner` | Installs `actions/runner`, clones it per job, runs it with the job's home and environment, patches the worker for the cache |
 | `internal/cache` | Local implementation of GitHub's cache service |
+| `internal/gitmirror` | A local mirror of the repo that checkouts borrow objects from |
 | `internal/workflows` | `spareci init`: finds jobs' `runs-on`, judges which suit this machine, rewrites the chosen lines in place |
 | `internal/estimate` | `spareci estimate`: prices recent jobs at GitHub's list prices |
 
@@ -125,6 +126,45 @@ Not covered: `ssh` and Xcode read the home directory from the user database, not
 
 **Pointing jobs at it.** The runner's worker sets `ACTIONS_RESULTS_URL` for every step, overwriting the environment. spareci keeps a second copy of the runner install in which the worker's UTF-16 string `ACTIONS_RESULTS_URL` is renamed to `ACTIONS_RESULTS_ORL` (same length). The worker then sets the renamed variable, and the value spareci puts in the runner's environment reaches the job. Other self-hosted cache servers use the same patch. If a runner release changes that string, the patch fails, spareci logs it and jobs use GitHub's cache. The unpatched install is used for `--cache=false`.
 
+## Git mirror
+
+`actions/checkout` starts from an empty directory every job (the runner's work directory is deleted with its clone), so every checkout downloads the commit's whole tree, or the whole history with `fetch-depth: 0`. A persistent machine can do better, as long as no workflow has to change.
+
+**How.** `internal/gitmirror` keeps a bare mirror of the repo's branches and tags at `<cache root>/git/<owner>/<repo>.git`. `spareci up` creates it in the background, and each job's start fetches it in the background too (one fetch at a time; about 0.5s when there's nothing new). The runner takes several seconds to start, so the mirror usually has the job's commit before checkout asks for it. Once the mirror exists, jobs get `GIT_TEMPLATE_DIR` pointing at a git template with:
+
+- `objects/info/alternates` naming the mirror's objects. `git init` copies it into every new repository, so the repository can read the mirror's objects and its fetch tells GitHub it already has them. The fetch still goes to github.com with the job's token, so access control, pushes, submodules and LFS are unchanged, and a commit the mirror doesn't have is simply downloaded.
+- `config` with `core.alternateRefsPrefixes` set to the default branch. Without it git offers every branch and tag of the mirror, and its connectivity check after the fetch walks from all of them: on microsoft/vscode (6,400 refs) that check took 6s, more than the download it saved.
+- `hooks/post-index-change`, which runs after the checkout writes the index. It copies the borrowed objects into the repository (`git repack -a -d`, local) and removes the alternates line. Afterwards the repository is self-contained, as on a hosted runner, so copying it into a container or a Docker build context works. If the hook doesn't run (a repository that is never checked out, or a global `core.hooksPath`), the repository keeps borrowing from the mirror, which still works on this machine.
+
+Not used with `--job-home=user` (your own git config, which may set `core.hooksPath`, applies there) or `--git-mirror=false`. If the mirror can't be created or fetched, jobs don't get the template, or keep using the existing mirror, and fetch from GitHub as before. The mirror is fetched with the token spareci uses for the API, sent in a header, without your git config.
+
+**Measured** (2026-11-10, Eventric, home connection; `SPARECI_BENCH_REPO=owner/name go test ./internal/gitmirror -run TestCheckoutTiming -v` runs checkout's own git commands with and without the mirror). "Checkout" includes the hook's repack.
+
+| Repo | Fetch | Without mirror (fetch + checkout) | With mirror |
+|---|---|---|---|
+| cli/cli (12,600 commits) | `fetch-depth: 1` (default) | 1.9–2.2s | 1.0–1.1s |
+| cli/cli | `fetch-depth: 0` | 5.5–6.2s | 1.6–2.2s |
+| microsoft/vscode (171,000 commits, 98 MB tree) | `fetch-depth: 1` | 12.8–13.6s | 5.3–5.7s |
+
+What remains with the mirror is writing the files and the repack, which grow with the tree, not the network. Creating the mirror took 7s for cli/cli and 2 minutes for vscode (1.7 GB on disk), once.
+
+Live, on Row-Labs/spareci's CI `build` job (a small repo, so little to save): the checkout step's fetch took 0.95s without the mirror (run 42909976175) and 0.49s with it (runs 42909280041 and 42910181600), checkout plus repack 0.04s vs 0.27s, and the whole step 3.5s vs 2.8s.
+
+## Docker
+
+Jobs use the host's Docker daemon, so image layers and BuildKit's own cache persist between jobs on this machine, as on any self-hosted runner. Three things needed fixing:
+
+- **CLI plugins.** `docker buildx` and `docker compose` are plugins in the user's `~/.docker/cli-plugins` (OrbStack and Docker Desktop link them there; Homebrew registers its directory in `cliPluginsExtraDirs`). A separate job home hid them: `docker buildx` was "unknown command". Each job start links them into the job home's `.docker/cli-plugins` (`runner.LinkDockerPlugins`). The user's `config.json`, with its registry credentials, is not copied.
+- **Docker context.** The job home has no docker contexts, so the CLI uses `/var/run/docker.sock`. OrbStack and Docker Desktop create it; Colima doesn't. If `DOCKER_HOST` is unset, `spareci up` reads the user's current context's endpoint and gives it to jobs as `DOCKER_HOST` (`runner.DockerHost`).
+- **BuildKit's `type=gha` cache** (`docker/build-push-action` with `cache-from/cache-to: type=gha`) uses the same cache service API as `actions/cache`, but failed the whole build on spareci, for two reasons. BuildKit runs in a container (the builder `setup-buildx-action` creates), or in the Docker VM on macOS, so `127.0.0.1` isn't spareci. And its client ([tonistiigi/go-actions-cache](https://github.com/tonistiigi/go-actions-cache)) reads the proto field names (`signed_upload_url`, `matched_key`, `entry_id`), while spareci sent only the lowerCamelCase ones `@actions/cache` reads. The server now sends both, and signs blob URLs with the host the client used. A `docker` shim, first on jobs' `PATH` when there is a docker to wrap, changes `ACTIONS_RESULTS_URL` for docker commands only while it is spareci's local cache: on macOS to the same listener as `host.docker.internal`, which the Docker VM forwards to the Mac's loopback (checked with OrbStack); elsewhere to GitHub's results service (`ACTIONS_RESULTS_ORL`, which the patched worker sets), as without spareci. Linux therefore still uses GitHub's cache for BuildKit; serving it locally there needs a listener on the Docker bridge.
+
+**Verified live** on 2026-11-10 with a throwaway workflow (`docker-e2e`, run 42909412143) on this Mac with OrbStack: `setup-buildx-action@v3` and `build-push-action@v6` with `cache-to: type=gha,mode=max` in one job, then a second job with a fresh builder and `cache-from`. The second job's `RUN` step was `CACHED` and produced the same file as the first, and spareci logged the BuildKit blobs saved and then hit locally. `SPARECI_TEST_DOCKER=1 go test ./internal/runner -run TestDockerBuildxGHACache -v` does the same locally against a real Docker.
+
+## Other ideas
+
+- **Tool cache.** Already shared: `RUNNER_TOOL_CACHE` is `<cache root>/toolcache` for every job, so `setup-node`, `setup-go` and friends download a version once.
+- **Persistent work directory** (keeping `_work` between jobs, as a plain self-hosted runner does) would make checkouts incremental too, but concurrent jobs would share it and leftovers would leak between jobs. The mirror gets most of the gain without that.
+
 ## Estimate
 
 `spareci estimate` lists runs with `GET /repos/{repo}/actions/runs?created=FROM..TO`, then each run's jobs with `GET .../runs/{id}/jobs?filter=all`, so re-run attempts count too. GitHub returns at most 1,000 runs for a filtered listing, so a busier window is split in half until each part fits. The run-timing endpoint is no use here: it now reports 0 ms for every job.
@@ -139,6 +179,6 @@ It checks `GET /rate_limit` before fetching jobs (one request per run) and stops
 
 ## Testing
 
-- `go test -short ./...`: unit tests, including the cache protocol over HTTP, the lease and rescue logic against a fake GitHub, the rendered launchd and systemd files, and `init`'s rewrites (table tests over realistic workflows in `internal/workflows/testdata`).
+- `go test -short ./...`: unit tests (including the git mirror against local repositories and the docker shim), including the cache protocol over HTTP, the lease and rescue logic against a fake GitHub, the rendered launchd and systemd files, and `init`'s rewrites (table tests over realistic workflows in `internal/workflows/testdata`).
 - `go test ./...` with `npm ci --prefix test/compat` done first: also runs the real `@actions/cache` npm client against the server (`test/compat/compat.mjs`), covering both upload paths, restore keys, misses and immutability.
 - CI (`.github/workflows/ci.yml`) runs on spareci when it's up, and on GitHub-hosted runners otherwise. Its `cache-save` → `cache-restore` jobs check a real save and restore through `actions/cache`, plus artifact pass-through. On self-hosted runners they also assert that the cache really was local.

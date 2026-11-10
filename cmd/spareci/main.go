@@ -19,6 +19,7 @@ import (
 
 	"github.com/Row-Labs/spareci/internal/cache"
 	"github.com/Row-Labs/spareci/internal/gh"
+	"github.com/Row-Labs/spareci/internal/gitmirror"
 	"github.com/Row-Labs/spareci/internal/pool"
 	"github.com/Row-Labs/spareci/internal/route"
 	"github.com/Row-Labs/spareci/internal/runner"
@@ -35,7 +36,7 @@ Usage:
                     opt this repo's workflow jobs in to spareci and open a PR
   spareci up        [--repo owner/name] [--label spareci] [--max 1] [--max-wait 10m]
                     [--dry-run] [--cache=true] [--cache-size 10GB]
-                    [--job-home spareci|user|PATH]
+                    [--job-home spareci|user|PATH] [--git-mirror=true]
                     [--only-on-ac] [--idle 10m] [--hours 18:00-08:00]
   spareci install   [--repo owner/name] [up flags]   run "up" in the background, at login
   spareci uninstall [--repo owner/name]
@@ -138,6 +139,7 @@ type upOpts struct {
 	cacheSize *string
 	upstream  *string
 	jobHome   *string
+	gitMirror *bool
 	laptop    *laptopOpts
 }
 
@@ -155,6 +157,7 @@ func upFlags(fs *flag.FlagSet) *upOpts {
 		cacheSize: fs.String("cache-size", "10GB", "local cache size before least recently used entries are evicted"),
 		upstream:  fs.String("cache-upstream", cache.DefaultUpstream, "GitHub results service, for calls the local cache passes through (artifacts)"),
 		jobHome:   fs.String("job-home", runner.HomeSpareci, `HOME for jobs: "spareci" (a separate home per repo), "user" (your own home and environment), or a path`),
+		gitMirror: fs.Bool("git-mirror", true, "keep a local mirror of the repo so checkouts fetch only new objects (needs a separate --job-home)"),
 		laptop:    laptopFlags(fs),
 	}
 }
@@ -210,6 +213,19 @@ func up(args []string) error {
 			return err
 		}
 		host.Prune()
+		if err := host.PrepareDocker(); err != nil {
+			slog.Warn("docker setup for jobs failed; docker steps may not find buildx or the local cache", "err", err)
+		}
+		if *o.gitMirror && host.JobHome != "" {
+			host.Git = gitmirror.New(host.Root, c.repo, client.Token())
+			go func() {
+				ctx, cancel := context.WithTimeout(soft, time.Hour)
+				defer cancel()
+				if err := host.Git.Update(ctx); err != nil && ctx.Err() == nil {
+					slog.Warn("no git mirror; checkouts fetch everything from GitHub", "err", err)
+				}
+			}()
+		}
 	}
 
 	var cacheSrv *cache.Server
@@ -220,7 +236,7 @@ func up(args []string) error {
 	}
 
 	labels := append(runner.DefaultLabels(), c.label)
-	slog.Info("spareci up", "repo", c.repo, "labels", labels, "max", *maxN, "runner", host.Version, "dir", host.Root, "job_home", cmp.Or(host.JobHome, "user"), "local_cache", cacheSrv != nil, "dry_run", *dry)
+	slog.Info("spareci up", "repo", c.repo, "labels", labels, "max", *maxN, "runner", host.Version, "dir", host.Root, "job_home", cmp.Or(host.JobHome, "user"), "local_cache", cacheSrv != nil, "git_mirror", host.Git != nil, "dry_run", *dry)
 	p := pool.New(pool.Config{
 		Repo:     c.repo,
 		Labels:   labels,
