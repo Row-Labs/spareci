@@ -1,0 +1,71 @@
+name: Release
+
+# A tag v<version> builds every platform, signs the Mac build and publishes.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: npm ci
+      - run: npm test
+
+  build-macos:
+    runs-on: macos-15 # needs Xcode
+    steps:
+      - uses: actions/checkout@v5
+      - run: npm ci
+      - run: npm run build -- --target darwin-arm64 --target darwin-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-macos
+          path: dist/
+
+  build-linux:
+    runs-on: "ubuntu-24.04"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - run: npm ci
+      - run: npm run build -- --target linux-x64 --target linux-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-linux
+          path: dist/
+
+  sign-macos:
+    needs: build-macos
+    runs-on: macos-15
+    environment: release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-macos
+          path: dist/
+      - name: Sign and notarize
+        env:
+          SIGNING_CERT: ${{ secrets.SIGNING_CERT }}
+        run: ./scripts/sign.sh dist/
+
+  publish:
+    needs: [checks, build-linux, sign-macos]
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+      - run: ./scripts/publish.sh dist/

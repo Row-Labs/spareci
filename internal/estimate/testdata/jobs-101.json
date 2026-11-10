@@ -1,0 +1,23 @@
+{"total_count": 7, "jobs": [
+  {"id": 1, "run_id": 101, "run_attempt": 1, "name": "test (macOS)", "status": "completed", "conclusion": "failure",
+   "started_at": "2026-11-01T10:00:00Z", "completed_at": "2026-11-01T10:03:10Z",
+   "labels": ["macos-15"], "runner_name": "GitHub Actions 1", "runner_group_id": 0, "runner_group_name": "GitHub Actions"},
+  {"id": 2, "run_id": 101, "run_attempt": 2, "name": "test (macOS)", "status": "completed", "conclusion": "success",
+   "started_at": "2026-11-01T10:10:00Z", "completed_at": "2026-11-01T10:13:00Z",
+   "labels": ["macos-15"], "runner_name": "GitHub Actions 2", "runner_group_id": null, "runner_group_name": "GitHub Actions"},
+  {"id": 3, "run_id": 101, "run_attempt": 1, "name": "lint", "status": "completed", "conclusion": "success",
+   "started_at": "2026-11-01T10:00:00Z", "completed_at": "2026-11-01T10:00:59Z",
+   "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 3", "runner_group_id": 0, "runner_group_name": "GitHub Actions"},
+  {"id": 4, "run_id": 101, "run_attempt": 1, "name": "deploy", "status": "completed", "conclusion": "skipped",
+   "started_at": "2026-11-01T10:04:00Z", "completed_at": "2026-11-01T10:04:00Z",
+   "labels": ["ubuntu-24.04"], "runner_name": null, "runner_group_id": null, "runner_group_name": null},
+  {"id": 5, "run_id": 101, "run_attempt": 1, "name": "never started", "status": "completed", "conclusion": "failure",
+   "started_at": "2026-11-01T10:00:00Z", "completed_at": "2026-11-01T10:00:02Z",
+   "labels": ["ubuntu-24.04"], "runner_name": "", "runner_group_id": 0, "runner_group_name": ""},
+  {"id": 6, "run_id": 101, "run_attempt": 1, "name": "build", "status": "completed", "conclusion": "success",
+   "started_at": "2026-11-01T10:00:00Z", "completed_at": "2026-11-01T10:07:30Z",
+   "labels": ["spareci"], "runner_name": "spareci-host-1", "runner_group_id": 1, "runner_group_name": "Default"},
+  {"id": 7, "run_id": 101, "run_attempt": 2, "name": "still going", "status": "in_progress", "conclusion": null,
+   "started_at": "2026-11-01T10:10:00Z", "completed_at": null,
+   "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 4", "runner_group_id": 0, "runner_group_name": "GitHub Actions"}
+]}

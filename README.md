@@ -11,15 +11,40 @@ spareci up --repo owner/name
 runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }}
 ```
 
-While `spareci up` is running, that job runs on your machine for free. Stop it, and the same job runs on GitHub-hosted runners again. CI never sits waiting on a laptop that's asleep.
+`spareci init` makes that change for the jobs you pick and opens a pull request. While `spareci up` is running, those jobs run on your machine for free. Stop it, and they run on GitHub-hosted runners again. CI never sits waiting on a laptop that's asleep.
 
-> **Status: early.** Jobs run directly on the host as your user (see [Security](#security)). Use it for private repos whose workflows you trust.
+> **Status: early.** Jobs run directly on the host as your user, with a separate home directory (see [Security](#security)). Use it for private repos whose workflows you trust.
 
 ## Why
 
 GitHub-hosted runners bill by the minute, and macOS minutes cost about 10x Linux minutes. Your Mac mini, spare laptop or $5 VPS is idle most of the day. The existing ways to use it either cost money (hosted runner vendors) or need real infrastructure (Kubernetes for actions-runner-controller, Terraform and an AWS account for the autoscaling modules). A plain `./config.sh` runner is free, but it's persistent and shared between jobs, and it breaks CI whenever the machine is off.
 
 spareci is the missing middle: one command, ephemeral runners, and automatic fallback.
+
+## What would it save?
+
+Before installing anything, see what your Actions minutes cost and how much of that this machine could take:
+
+```sh
+spareci estimate                          # the repo in the current directory, last 30 days
+spareci estimate --repo you/app --repo you/api --days 90
+spareci estimate --org your-org --json    # every repo the token can see, as JSON
+```
+
+```
+you/app · Oct 11 – Nov 10 (30 days) · 225 runs, 806 jobs
+
+  RUNNER                   JOBS   MINUTES           COST  THIS MACHINE
+  macOS standard            526     2,091           $130  yes
+  Linux 2-core              279       969          $5.81  no
+  Self-hosted                 1         7          $0.00  already
+  Total, GitHub-hosted              3,060           $135
+
+≈ $135/month on GitHub-hosted runners.
+This machine (macOS ARM64) could take 2,091 of those minutes: ≈ $130/month saved.
+```
+
+It reads your runs and jobs through the GitHub API and changes nothing. Each job is priced the way GitHub bills it: rounded up to the whole minute, at the list price for its runner type, with standard runners free in public repos. Prices come from [GitHub's pricing page](https://docs.github.com/en/billing/reference/actions-runner-pricing) and are dated in `internal/estimate/prices.go`. "This machine" means same OS and CPU architecture. Your plan's included usage ($12 to $300 a month) is not subtracted, and larger runners are priced only when their label gives the size (`ubuntu-8-core`). It makes one API request per run, so `--org` over a busy org can take a few minutes; it stops early rather than use up your hourly rate limit.
 
 ## Install
 
@@ -48,6 +73,32 @@ go install github.com/Row-Labs/spareci/cmd/spareci@latest
 
 Check it with `spareci version`.
 
+## Set up a repo
+
+```sh
+cd your-repo
+spareci init
+```
+
+`init` lists every job in `.github/workflows`, recommends the ones this machine can take (same OS and architecture; macOS jobs need a Mac), and asks which to convert. It rewrites only those jobs' `runs-on` lines, shows the diff, then commits to a new branch, pushes it and opens a pull request. Nothing changes for anyone until spareci is running.
+
+```sh
+spareci init --dry-run                          # show the diff, change nothing
+spareci init --all-compatible                   # no prompt: every recommended job
+spareci init --jobs ci:build,release:macos      # no prompt: these jobs (workflow file name:job id)
+```
+
+Without a terminal, pass `--jobs` or `--all-compatible`. The pull request goes into the branch you're on (`--base` to change it), which must match what's on GitHub.
+
+What it converts:
+
+| `runs-on` | Becomes |
+|---|---|
+| `macos-15` | `${{ vars.SPARECI_RUNS_ON \|\| 'macos-15' }}` |
+| `[self-hosted, macOS, ARM64]` | `${{ vars.SPARECI_RUNS_ON \|\| fromJSON('["self-hosted","macOS","ARM64"]') }}` |
+
+A list keeps every label in its fallback, since a self-hosted runner has to carry them all. A self-hosted job is only offered if this machine has every label it asks for. `init` leaves alone, and says why: `runs-on` expressions (including `${{ matrix.os }}`; edit those by hand), runner groups, YAML aliases, reusable-workflow calls and jobs that are already converted. Jobs with `container:` or `services:` need Linux.
+
 ## Use
 
 ```sh
@@ -56,13 +107,44 @@ spareci up                 # take jobs for this repo; ^C to stop
 spareci up --max 2         # run two jobs at once
 spareci up --dry-run       # show which queued jobs would come here, register nothing
 spareci status             # runners and queued jobs
+spareci up --job-home=user # give jobs your own HOME and environment, as before
 spareci cache ls           # what's in the local cache
 spareci down               # after a crash: route jobs back to GitHub, remove stale runners
+spareci estimate           # what your Actions minutes cost, and what this machine could save
 ```
 
-Press `^C` once and spareci routes new jobs back to GitHub and lets running jobs finish. Press it twice and running jobs are aborted.
+Press `^C` once and spareci routes new jobs back to GitHub, lets running jobs finish, and then sends any job still queued for this machine to GitHub-hosted runners. Press it twice and running jobs are aborted.
 
 Route only the jobs you want. A job is sent here when its `runs-on` labels are all ones this machine has: `self-hosted`, the OS (`macOS` or `Linux`), the arch (`ARM64` or `X64`) and `spareci` (change it with `--label`). The `vars.SPARECI_RUNS_ON || ...` form is what gives you the fallback, and spareci sets and clears that variable for you.
+
+### Run it in the background
+
+```sh
+spareci install            # start `spareci up` for this repo now and at every login
+spareci install --max 2    # flags after install are passed to `up`
+spareci logs -f            # follow its log
+spareci uninstall          # stop it, route jobs back to GitHub, remove the service
+```
+
+On macOS this is a launchd agent in `~/Library/LaunchAgents`, on Linux a systemd user unit in `~/.config/systemd/user`. Either one restarts spareci within 10 seconds if it crashes or is killed. On a Linux server, run `loginctl enable-linger $USER` so it keeps running while you're logged out.
+
+### When this machine goes away
+
+A job never waits on this machine for long:
+
+- **Busy machine.** A job routed here that waits more than `--max-wait` (default 10 minutes) is sent to GitHub-hosted runners. Turn it off with `--max-wait 0`.
+- **Dead machine** (crash, `kill -9`, power cut, a laptop that went to sleep). Nothing on the machine can clean up, so a small workflow on GitHub does it. Add it once:
+
+  ```sh
+  spareci watchdog > .github/workflows/spareci-watchdog.yml   # commit it to your default branch
+  gh secret set SPARECI_TOKEN   # paste a fine-grained token for this repo with "Variables: read and write"
+  ```
+
+  While spareci is up it refreshes a heartbeat variable every minute. When the heartbeat is more than 5 minutes old, the watchdog clears the routing variable and re-runs jobs that were queued for this machine on GitHub-hosted runners. Expect that within about 15 to 20 minutes of the machine going away, longer if GitHub is slow to start scheduled workflows. While spareci is healthy, the watchdog's runs are skipped and use no Actions minutes.
+
+  The token is needed because a workflow's own `GITHUB_TOKEN` can't change repo variables. When the machine comes back, spareci turns routing on again by itself.
+
+Sending a job back means cancelling its workflow run and re-running it, because GitHub reads `vars` once per run attempt. Usually only the cancelled jobs are re-run. If an earlier job in the run already finished on this machine, the whole run is re-run on GitHub, since that job's caches are on this machine where a GitHub-hosted job can't restore them. See [docs/how-it-works.md](docs/how-it-works.md#routing).
 
 ## How it works
 
@@ -75,19 +157,37 @@ See [docs/how-it-works.md](docs/how-it-works.md) for the details, including how 
 
 ## Security
 
-Today every job runs as your user on the host, with access to whatever your user can reach. That's the same trust model as running the workflow's commands yourself, so:
+Every job runs as your user on the host. By default it gets its own home directory and a cleaned environment (see [What a job can see](#what-a-job-can-see)), but that keeps jobs out of your personal tool state, not out of your account: a job can still read anything your user can read. That's the same trust model as running the workflow's commands yourself, so:
 
 - Use spareci only with **private repos** whose workflows and contributors you trust.
 - **Never with public repos.** A fork's pull request could run code on your machine.
 
-Per-job VM isolation (Tart on macOS, containers or microVMs on Linux) is the next major milestone, and public-repo support will wait for it.
+Per-job VM and container isolation is the next major milestone, and public-repo support waits for it. See [docs/isolation.md](docs/isolation.md) for the design.
+
+## What a job can see
+
+By default (`--job-home=spareci`) each repo's jobs get a persistent home of their own, `~/Library/Caches/spareci/home/<owner>/<repo>` (`~/.cache/spareci/home/...` on Linux). It's shared by that repo's jobs, so tool caches stay warm between runs, and it's separate from yours.
+
+| | Separate from you | Notes |
+|---|---|---|
+| `HOME` and everything tools keep under it: `~/go`, Go build cache, `~/.npm`, `~/.cargo`, `~/.rustup`, pip cache, `~/.gitconfig`, `~/.npmrc`, `~/.docker/config.json` | Yes | Tools find their paths from `HOME`, so `setup-go` and friends cache the job home, not yours. |
+| Your shell environment (`GOPATH`, `CARGO_HOME`, `XDG_*`, `GH_TOKEN`, `SSH_AUTH_SOCK`, ...) | Yes | Jobs get only locale, `TMPDIR`, proxy and CA settings, `DEVELOPER_DIR`, `DOCKER_HOST` and `PATH`. |
+| Tools installed in your home (rustup, nvm, pyenv, `~/go/bin`, `~/.local/bin`) | Yes | Those `PATH` entries are removed. Install toolchains in the workflow (`setup-node`, `dtolnay/rust-toolchain`, ...) as on hosted runners. Homebrew and other system-wide installs still work. |
+| git's system config | Yes | `GIT_CONFIG_NOSYSTEM=1`, which also turns off the macOS keychain credential helper Xcode's and Homebrew's git enable. `actions/checkout` uses the job's own token. |
+| macOS keychain | Partly | The job home has no keychain search list, so the default lookups find nothing. The login keychain is still unlocked in your session and readable by path. |
+| SSH keys and `~/.ssh/config` | No | `ssh` finds your home from the user database, not `HOME`. |
+| Xcode: DerivedData, simulators, signing identities | No | Xcode also ignores `HOME`. Pass `-derivedDataPath` to keep builds out of `~/Library/Developer`. |
+| Everything else your user can read or write | No | Files, Docker daemon, local network. |
+
+`--job-home=user` restores the old behaviour: your own `HOME` and your full environment. `--job-home=/some/path` uses that directory instead. To reset a repo's job home, delete its directory while spareci is stopped.
 
 ## Limits
 
-- Jobs share your home directory, so tools' own caches (`~/go`, `~/.npm`, `~/.cargo`, ...) are your personal ones, and `setup-*` actions will cache them. A separate job home is part of the isolation work.
+- Jobs in the same repo share their job home, and so do concurrent jobs (`--max 2`). Whatever one job leaves there, the next one sees.
 - One repo per `spareci up` process.
 - Jobs using `container:` or Docker container actions can't reach the local cache yet; they fall back to GitHub's cache.
-- If spareci is killed without `^C` (crash, power loss), the routing variable stays set and jobs queue until you run `spareci down` or start it again. A background service with crash-safe routing is planned.
+- Without the watchdog workflow, if spareci dies without `^C` (crash, power loss), jobs queue for this machine until it starts again or you run `spareci down`. `spareci install` restarts it after a crash, but can't help when the machine itself is off.
+- Sending a job back to GitHub cancels its whole run first, because GitHub has no per-job cancel. `--max-wait` therefore waits until no job in that run is running. If any job in the run already finished here, the whole run is re-run on GitHub, which repeats that work.
 
 ## Contributing
 

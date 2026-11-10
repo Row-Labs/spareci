@@ -122,13 +122,17 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 }
 
 type Job struct {
-	ID         int64    `json:"id"`
-	RunID      int64    `json:"run_id"`
-	Name       string   `json:"name"`
-	Status     string   `json:"status"`
-	Labels     []string `json:"labels"`
-	RunnerName string   `json:"runner_name"`
-	HTMLURL    string   `json:"html_url"`
+	ID          int64     `json:"id"`
+	RunID       int64     `json:"run_id"`
+	Name        string    `json:"name"`
+	Status      string    `json:"status"`
+	Labels      []string  `json:"labels"`
+	RunnerName  string    `json:"runner_name"`
+	HTMLURL     string    `json:"html_url"`
+	RunAttempt  int       `json:"run_attempt"`
+	Conclusion  string    `json:"conclusion"`
+	CreatedAt   time.Time `json:"created_at"`
+	CompletedAt time.Time `json:"completed_at"`
 }
 
 // QueuedJobs returns every queued job in the repo. A run whose first job is
@@ -150,13 +154,11 @@ func (c *Client) QueuedJobs(ctx context.Context, repo string) ([]Job, error) {
 				continue
 			}
 			seen[r.ID] = true
-			var page struct {
-				Jobs []Job `json:"jobs"`
-			}
-			if err := c.do(ctx, "GET", fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?filter=latest&per_page=100", repo, r.ID), nil, &page); err != nil {
+			page, err := c.RunJobs(ctx, repo, r.ID)
+			if err != nil {
 				return nil, err
 			}
-			for _, j := range page.Jobs {
+			for _, j := range page {
 				if j.Status == "queued" {
 					jobs = append(jobs, j)
 				}
@@ -164,6 +166,51 @@ func (c *Client) QueuedJobs(ctx context.Context, repo string) ([]Job, error) {
 		}
 	}
 	return jobs, nil
+}
+
+// RunJobs is every job in a run's latest attempt.
+func (c *Client) RunJobs(ctx context.Context, repo string, runID int64) ([]Job, error) {
+	var page struct {
+		Jobs []Job `json:"jobs"`
+	}
+	err := c.do(ctx, "GET", fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?filter=latest&per_page=100", repo, runID), nil, &page)
+	return page.Jobs, err
+}
+
+type Run struct {
+	ID           int64     `json:"id"`
+	Status       string    `json:"status"`
+	RunAttempt   int       `json:"run_attempt"`
+	RunStartedAt time.Time `json:"run_started_at"` // of the latest attempt
+	HTMLURL      string    `json:"html_url"`
+}
+
+func (c *Client) GetRun(ctx context.Context, repo string, runID int64) (Run, error) {
+	var r Run
+	err := c.do(ctx, "GET", fmt.Sprintf("/repos/%s/actions/runs/%d", repo, runID), nil, &r)
+	return r, err
+}
+
+// CancelRun cancels every job in a run. GitHub has no per-job cancel.
+func (c *Client) CancelRun(ctx context.Context, repo string, runID int64) error {
+	return c.do(ctx, "POST", fmt.Sprintf("/repos/%s/actions/runs/%d/cancel", repo, runID), nil, nil)
+}
+
+// ForceCancelRun cancels a run that ignores CancelRun, such as one whose job
+// is held by a runner that has gone away.
+func (c *Client) ForceCancelRun(ctx context.Context, repo string, runID int64) error {
+	return c.do(ctx, "POST", fmt.Sprintf("/repos/%s/actions/runs/%d/force-cancel", repo, runID), nil, nil)
+}
+
+// RerunFailedJobs starts a new attempt of the run's failed and cancelled jobs
+// and their dependents. The new attempt reads repo variables afresh.
+func (c *Client) RerunFailedJobs(ctx context.Context, repo string, runID int64) error {
+	return c.do(ctx, "POST", fmt.Sprintf("/repos/%s/actions/runs/%d/rerun-failed-jobs", repo, runID), nil, nil)
+}
+
+// RerunRun starts a new attempt of every job in the run.
+func (c *Client) RerunRun(ctx context.Context, repo string, runID int64) error {
+	return c.do(ctx, "POST", fmt.Sprintf("/repos/%s/actions/runs/%d/rerun", repo, runID), nil, nil)
 }
 
 type JITRunner struct {
