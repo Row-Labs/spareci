@@ -21,6 +21,29 @@ builds:
       - -s -w -X main.version={{ .Version }}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
+# Sign and notarize the darwin binaries with a Developer ID Application
+# certificate and an App Store Connect API key. Runs only when the release
+# workflow sets MACOS_NOTARIZE=true, which it does when all five Apple secrets
+# are present (see docs/releasing.md); otherwise this step is skipped and the
+# binaries ship unsigned. Works from Linux: GoReleaser signs with quill, no
+# Xcode needed.
+notarize:
+  macos:
+    - ids: [spareci]
+      enabled: '{{ eq (envOrDefault "MACOS_NOTARIZE" "") "true" }}'
+      sign:
+        # base64 of the .p12, or a path to it.
+        certificate: "{{ .Env.MACOS_SIGN_P12 }}"
+        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
+      notarize:
+        # base64 of the .p8, or a path to it.
+        key: "{{ .Env.MACOS_NOTARY_KEY }}"
+        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
+        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
+        wait: true
+        # Apple's maximum; GoReleaser rejects anything longer.
+        timeout: 20m
+
 archives:
   - formats: [tar.gz]
     # spareci_darwin_arm64.tar.gz: no version in the name, so
@@ -61,11 +84,14 @@ homebrew_casks:
       name: spareci-release
       email: noreply@github.com
     commit_msg_template: "spareci {{ .Tag }}"
-    # The binary isn't notarized; without this, macOS Gatekeeper blocks it
-    # on first run.
+    # An unsigned binary is blocked by Gatekeeper on first run, so strip the
+    # quarantine attribute unless this release was signed and notarized
+    # (MACOS_NOTARIZE=true, see the notarize section above).
     hooks:
       post:
         install_steps: |
+          {{- if ne (envOrDefault "MACOS_NOTARIZE" "") "true" }}
           on_macos do
             run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/spareci"]
           end
+          {{- end }}
