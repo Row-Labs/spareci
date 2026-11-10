@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -56,8 +57,19 @@ type JobListener struct {
 }
 
 // Env is what the job's runner process needs to use this listener.
+//
+// SPARECI_RESULTS_URL and SPARECI_BUILDKIT_RESULTS_URL are for spareci's
+// docker shim (internal/runner/docker.go): BuildKit runs in a container and
+// can't reach 127.0.0.1. On macOS the Docker VM forwards
+// host.docker.internal to the Mac's loopback (checked with OrbStack; Docker
+// Desktop documents the same), so BuildKit gets this listener under that
+// name. Elsewhere the shim falls back to GitHub's cache service.
 func (j *JobListener) Env() []string {
-	return []string{"ACTIONS_RESULTS_URL=" + j.URL, "ACTIONS_CACHE_SERVICE_V2=true"}
+	env := []string{"ACTIONS_RESULTS_URL=" + j.URL, "ACTIONS_CACHE_SERVICE_V2=true", "SPARECI_RESULTS_URL=" + j.URL}
+	if runtime.GOOS == "darwin" {
+		env = append(env, "SPARECI_BUILDKIT_RESULTS_URL="+strings.Replace(j.URL, "//127.0.0.1:", "//host.docker.internal:", 1))
+	}
+	return env
 }
 
 func (j *JobListener) Close() {
@@ -112,7 +124,10 @@ func (h *jobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // --- Twirp (JSON) --------------------------------------------------------
 //
 // actions/cache sends protobuf JSON with lowerCamelCase names; we also accept
-// the proto field names, which protobuf JSON parsers must.
+// the proto field names, which protobuf JSON parsers must. Responses carry
+// both spellings: @actions/cache reads lowerCamelCase, while BuildKit's
+// type=gha client (tonistiigi/go-actions-cache) decodes with encoding/json
+// and reads only the proto names (signed_upload_url, ...).
 
 type twirpReq struct {
 	Key          string          `json:"key"`
@@ -145,39 +160,41 @@ func (h *jobHandler) twirp(w http.ResponseWriter, r *http.Request, method string
 		e := h.s.store.Lookup(h.repo, read, req.Key, append(req.RestoreKeys, req.RestoreKeys2...), req.Version)
 		if e == nil {
 			slog.Info("cache miss", "repo", h.repo, "key", req.Key)
-			writeJSON(w, map[string]any{"ok": false, "signedDownloadUrl": "", "matchedKey": ""})
+			writeJSON(w, map[string]any{"ok": false, "signedDownloadUrl": "", "matchedKey": "", "signed_download_url": "", "matched_key": ""})
 			return
 		}
 		slog.Info("cache hit", "repo", h.repo, "key", e.Key, "size", HumanBytes(e.Size))
-		writeJSON(w, map[string]any{"ok": true, "signedDownloadUrl": h.sign("d", strconv.FormatInt(e.ID, 10)), "matchedKey": e.Key})
+		u := h.sign(r, "d", strconv.FormatInt(e.ID, 10))
+		writeJSON(w, map[string]any{"ok": true, "signedDownloadUrl": u, "matchedKey": e.Key, "signed_download_url": u, "matched_key": e.Key})
 
 	case "CreateCacheEntry":
 		scope, ok := writeScope(scopes)
 		if !ok {
-			writeJSON(w, map[string]any{"ok": false, "signedUploadUrl": "", "message": "job token cannot write to the cache"})
+			writeJSON(w, map[string]any{"ok": false, "signedUploadUrl": "", "signed_upload_url": "", "message": "job token cannot write to the cache"})
 			return
 		}
 		id, err := h.s.store.Reserve(h.repo, scope, req.Key, req.Version)
 		if errors.Is(err, ErrExists) {
-			writeJSON(w, map[string]any{"ok": false, "signedUploadUrl": ""})
+			writeJSON(w, map[string]any{"ok": false, "signedUploadUrl": "", "signed_upload_url": ""})
 			return
 		}
 		if err != nil {
 			twirpError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true, "signedUploadUrl": h.sign("u", id)})
+		u := h.sign(r, "u", id)
+		writeJSON(w, map[string]any{"ok": true, "signedUploadUrl": u, "signed_upload_url": u})
 
 	case "FinalizeCacheEntryUpload":
 		scope, _ := writeScope(scopes)
 		e, err := h.s.store.Finalize(h.repo, scope, req.Key, req.Version)
 		if err != nil {
 			slog.Warn("cache save failed", "repo", h.repo, "key", req.Key, "err", err)
-			writeJSON(w, map[string]any{"ok": false, "entryId": "0"})
+			writeJSON(w, map[string]any{"ok": false, "entryId": "0", "entry_id": "0"})
 			return
 		}
 		slog.Info("cache saved", "repo", h.repo, "key", e.Key, "scope", e.Scope, "size", HumanBytes(e.Size))
-		writeJSON(w, map[string]any{"ok": true, "entryId": strconv.FormatInt(e.ID, 10)})
+		writeJSON(w, map[string]any{"ok": true, "entryId": strconv.FormatInt(e.ID, 10), "entry_id": strconv.FormatInt(e.ID, 10)})
 
 	default:
 		twirpError(w, http.StatusNotFound, "bad_route", "unsupported method "+method)
@@ -216,8 +233,16 @@ func (h *jobHandler) sig(kind, id string) string {
 	return hex.EncodeToString(m.Sum(nil))[:32]
 }
 
-func (h *jobHandler) sign(kind, id string) string {
-	return fmt.Sprintf("%s/%s/%s/%s", h.base, kind, h.sig(kind, id), id)
+// sign returns a signed blob URL on the host the client reached us by. Most
+// clients use the 127.0.0.1 URL from ACTIONS_RESULTS_URL, but BuildKit runs
+// in a container and reaches this listener as host.docker.internal (see
+// buildkitURL), and must be sent back there for the blob too.
+func (h *jobHandler) sign(r *http.Request, kind, id string) string {
+	base := h.base
+	if r.Host != "" {
+		base = "http://" + r.Host
+	}
+	return fmt.Sprintf("%s/%s/%s/%s", base, kind, h.sig(kind, id), id)
 }
 
 func (h *jobHandler) verify(r *http.Request, kind string) (string, bool) {

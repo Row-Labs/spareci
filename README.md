@@ -108,6 +108,7 @@ spareci up --max 2         # run two jobs at once
 spareci up --dry-run       # show which queued jobs would come here, register nothing
 spareci status             # runners and queued jobs
 spareci up --job-home=user # give jobs your own HOME and environment, as before
+spareci up --git-mirror=false  # no local git mirror; checkouts fetch everything
 spareci cache ls           # what's in the local cache
 spareci down               # after a crash: route jobs back to GitHub, remove stale runners
 spareci estimate           # what your Actions minutes cost, and what this machine could save
@@ -220,6 +221,8 @@ Sending a job back means cancelling its workflow run and re-running it, because 
 - **No inbound connections.** spareci polls the GitHub API (with ETags, so idle polling barely touches your rate limit) and works from behind NAT or on a laptop.
 - **Local cache.** `actions/cache` and everything built on it (`setup-node`, `setup-go`, `setup-python`, ...) save to and restore from this machine's disk instead of uploading to GitHub. Saving a 1 GB Go build cache takes seconds instead of a minute or more. Caches follow GitHub's rules: a key is immutable once saved, and a pull request can read its base branch's caches but not write them. When the cache passes `--cache-size` (default 10 GB), the least recently used entries are evicted.
 - **Shared toolchains.** Tools downloaded by `setup-*` actions are kept between jobs.
+- **Faster checkouts.** spareci keeps a mirror of the repo on this machine and updates it before each job, so `actions/checkout` downloads only what the mirror doesn't have yet. It still fetches from github.com with the job's own token, so nothing changes for auth, pushes, submodules or LFS. On microsoft/vscode a checkout went from 13s to 5.5s. Turn it off with `--git-mirror=false`.
+- **Docker.** Jobs use the host's Docker, so image layers persist between jobs. `docker/build-push-action` with `cache-to: type=gha` saves its layers to the local cache too.
 
 See [docs/how-it-works.md](docs/how-it-works.md) for the details, including how the local cache is wired in.
 
@@ -254,6 +257,7 @@ By default (`--job-home=spareci`) each repo's jobs get a persistent home of thei
 - Jobs in the same repo share their job home, and so do concurrent jobs (`--max 2`). Whatever one job leaves there, the next one sees.
 - One repo per `spareci up` process.
 - Jobs using `container:` or Docker container actions can't reach the local cache yet; they fall back to GitHub's cache.
+- BuildKit's `type=gha` cache uses the local cache on macOS only (through `host.docker.internal`). On Linux it uses GitHub's cache service, as without spareci.
 - Without the watchdog workflow, if spareci dies without `^C` (crash, power loss), jobs queue for this machine until it starts again or you run `spareci down`. `spareci install` restarts it after a crash, but can't help when the machine itself is off.
 - Sending a job back to GitHub cancels its whole run first, because GitHub has no per-job cancel. `--max-wait` therefore waits until no job in that run is running. If any job in the run already finished here, the whole run is re-run on GitHub, which repeats that work.
 

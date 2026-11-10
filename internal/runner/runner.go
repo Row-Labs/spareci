@@ -17,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/Row-Labs/spareci/internal/gitmirror"
 )
 
 type Host struct {
@@ -25,8 +27,35 @@ type Host struct {
 	// JobHome is the HOME jobs run with (see ResolveJobHome and JobEnv).
 	// Empty: the user's own home and environment.
 	JobHome string
+	// Git, if set, is a local mirror of the job's repository that checkouts
+	// borrow objects from. Run refreshes it in the background before each job.
+	Git *gitmirror.Mirror
 
-	source string // install to clone per job; set by PrepareCacheVariant
+	source     string // install to clone per job; set by PrepareCacheVariant
+	shimDir    string // docker shim, first on jobs' PATH; set by PrepareDocker
+	dockerHost string // DOCKER_HOST for jobs with a separate home; set by PrepareDocker
+}
+
+// PrepareDocker sets up what jobs need to use the host's docker (see
+// docker.go). Without docker it does nothing.
+func (h *Host) PrepareDocker() error {
+	userHome, _ := os.UserHomeDir()
+	env := JobEnv(os.Environ(), userHome, h.JobHome)
+	var path string
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			path = v
+		}
+	}
+	dir, err := WriteDockerShim(filepath.Join(h.Root, "shims"), path)
+	if err != nil || dir == "" {
+		return err
+	}
+	h.shimDir = dir
+	if h.JobHome != "" {
+		h.dockerHost = DockerHost(os.Environ())
+	}
+	return nil
 }
 
 func DefaultRoot() string {
@@ -137,6 +166,18 @@ func (h *Host) Run(ctx context.Context, name, jitConfig string, extraEnv []strin
 		}
 	}
 	defer os.RemoveAll(dir)
+	if h.Git != nil {
+		// The runner takes several seconds to start and fetch its actions,
+		// so the mirror usually has the job's commit before checkout asks.
+		extraEnv = append(extraEnv, h.Git.Env()...)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			if err := h.Git.Update(ctx); err != nil {
+				slog.Warn("git mirror not updated; checkouts fetch more from GitHub", "err", err)
+			}
+		}()
+	}
 	src := h.source
 	if src == "" {
 		src = h.installDir()
@@ -146,6 +187,17 @@ func (h *Host) Run(ctx context.Context, name, jitConfig string, extraEnv []strin
 	}
 	userHome, _ := os.UserHomeDir()
 	base := JobEnv(os.Environ(), userHome, h.JobHome)
+	if h.JobHome != "" {
+		if err := LinkDockerPlugins(userHome, os.Getenv("DOCKER_CONFIG"), h.JobHome); err != nil {
+			slog.Warn("docker CLI plugins not linked into the job home", "err", err)
+		}
+		if h.dockerHost != "" {
+			base = append(base, "DOCKER_HOST="+h.dockerHost)
+		}
+	}
+	if h.shimDir != "" {
+		base = prependPath(base, h.shimDir)
+	}
 	env := append([]string{"AGENT_TOOLSDIRECTORY=" + h.ToolCache(), "RUNNER_TOOL_CACHE=" + h.ToolCache()}, extraEnv...)
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(strings.Join(env, "\n")+"\n"), 0o644); err != nil {
 		return res, err

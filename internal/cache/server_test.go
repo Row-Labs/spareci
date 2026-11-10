@@ -207,3 +207,45 @@ func TestScopesFromAuth(t *testing.T) {
 		}
 	}
 }
+
+// BuildKit's type=gha client (tonistiigi/go-actions-cache) decodes responses
+// with encoding/json and the proto field names, and reaches us from a
+// container as host.docker.internal, so blob URLs must come back on the host
+// it used.
+func TestBuildKitClientFieldsAndHost(t *testing.T) {
+	s := newServer(t, "")
+	jl := listen(t, s, "o/r")
+	b, _ := json.Marshal(map[string]any{"key": "buildkit-blob-1", "version": "v"})
+	req, _ := http.NewRequest("POST", jl.URL+"twirp/github.actions.results.api.v1.CacheService/CreateCacheEntry", bytes.NewReader(b))
+	req.Host = "host.docker.internal:" + strings.Split(strings.TrimSuffix(jl.URL, "/"), ":")[2]
+	req.Header.Set("Authorization", mainToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created struct {
+		OK  bool   `json:"ok"`
+		URL string `json:"signed_upload_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !created.OK || !strings.HasPrefix(created.URL, "http://"+req.Host+"/u/") {
+		t.Fatalf("create = %+v, want an upload URL on %s", created, req.Host)
+	}
+	// The signature doesn't depend on the host name: upload on 127.0.0.1.
+	up := strings.Replace(created.URL, req.Host, strings.TrimPrefix(strings.TrimSuffix(jl.URL, "/"), "http://"), 1)
+	put(t, up, []byte("blob"), http.StatusCreated)
+	fin := call(t, jl, mainToken, "FinalizeCacheEntryUpload", map[string]any{"key": "buildkit-blob-1", "version": "v", "size_bytes": 4})
+	if fin["ok"] != true || fin["entry_id"] == nil {
+		t.Fatalf("finalize: %v", fin)
+	}
+	hit := call(t, jl, mainToken, "GetCacheEntryDownloadURL", map[string]any{"key": "buildkit-blob-1", "restore_keys": []string{}, "version": "v"})
+	if hit["ok"] != true || hit["matched_key"] != "buildkit-blob-1" || hit["signed_download_url"] == "" {
+		t.Fatalf("lookup: %v", hit)
+	}
+	if code, body := get(t, hit["signed_download_url"].(string)); code != 200 || string(body) != "blob" {
+		t.Fatalf("download: %d %q", code, body)
+	}
+}
