@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>spareci: free macOS CI on the Mac on your desk</title>
+<meta name="description" content="spareci runs your GitHub Actions jobs on a machine you already own. One command to set up, one line changed in your workflow, and jobs fall back to GitHub-hosted runners when your machine is away. Free and open source.">
+<link rel="canonical" href="https://spareci.dev/">
+<meta property="og:title" content="spareci: free macOS CI on the Mac on your desk">
+<meta property="og:description" content="Run GitHub Actions jobs on a machine you already own. One command, one changed line, automatic fallback to GitHub-hosted runners. MIT licensed.">
+<meta property="og:url" content="https://spareci.dev/">
+<meta property="og:type" content="website">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f7f7f4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111311" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<script>
+  // Apply a saved theme before first paint. The page works without it.
+  try { var t = localStorage.getItem("theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="top">
+  <div class="wrap top-in">
+    <a class="brand" href="#" aria-label="spareci home">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="7" width="26" height="17" rx="3" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M11 28h10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M10 16.5l3.5 3 8-8" fill="none" stroke="var(--accent)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>spareci</span>
+    </a>
+    <nav aria-label="Sections">
+      <ul>
+        <li><a href="#how">How it works</a></li>
+        <li><a href="#savings">Savings</a></li>
+        <li><a href="#compare">Compare</a></li>
+        <li><a href="#security">Security</a></li>
+        <li><a href="#install">Install</a></li>
+      </ul>
+    </nav>
+    <div class="top-actions">
+      <a class="gh" href="https://github.com/Row-Labs/spareci">GitHub</a>
+      <button class="theme" type="button" aria-label="Switch to dark theme" hidden>
+        <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.5"/><path d="M12 1.5v3M12 19.5v3M1.5 12h3M19.5 12h3M4.6 4.6l2.1 2.1M17.3 17.3l2.1 2.1M4.6 19.4l2.1-2.1M17.3 6.7l2.1-2.1"/></svg>
+        <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero">
+  <div class="wrap hero-in">
+    <div class="hero-copy">
+      <p class="eyebrow">Open source · MIT · macOS and Linux</p>
+      <h1>Free macOS CI on the Mac on your desk.</h1>
+      <p class="lede">spareci runs your GitHub Actions jobs on a machine you already own. One command to set up, one line changed in your workflow. When the machine is off, asleep or busy, jobs run on GitHub-hosted runners as before.</p>
+      <div class="cta">
+        <a class="btn primary" href="#install">Install spareci</a>
+        <a class="btn" href="#savings">What would I save?</a>
+      </div>
+      <p class="price-note">GitHub bills <strong data-price="actions_macos">$0.062</strong> a minute for macOS and <strong data-price="actions_linux">$0.006</strong> for Linux. That's about 10x. A Mac mini you already paid for bills nothing.</p>
+    </div>
+
+    <figure class="diff" aria-labelledby="diff-cap">
+      <figcaption id="diff-cap"><span class="file">.github/workflows/ci.yml</span><span class="tag">the only change</span></figcaption>
+<pre><code><span class="ln"> </span>jobs:
+<span class="ln"> </span>  test:
+<span class="del"><span class="ln">-</span>    runs-on: macos-15
+</span><span class="add"><span class="ln">+</span>    runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }}
+</span><span class="ln"> </span>    steps:
+<span class="ln"> </span>      - uses: actions/checkout@v5</code></pre>
+      <p class="diff-foot">While spareci is up, <code>SPARECI_RUNS_ON</code> points at your machine. Otherwise it's empty and the job runs on <code>macos-15</code>. <code>spareci init</code> makes this edit and opens the pull request for you.</p>
+    </figure>
+  </div>
+</section>
+
+<section id="how" class="band">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <ol class="steps">
+      <li>
+        <span class="n" aria-hidden="true">1</span>
+        <h3>See what it would save</h3>
+        <pre class="cmd"><code>spareci estimate</code></pre>
+        <p>Reads the last 30 days of runs through the GitHub API, prices each job the way GitHub bills it, and shows which minutes this machine could take. Changes nothing.</p>
+      </li>
+      <li>
+        <span class="n" aria-hidden="true">2</span>
+        <h3>Opt jobs in</h3>
+        <pre class="cmd"><code>spareci init</code></pre>
+        <p>Lists your workflow jobs, recommends the ones this machine can run (same OS and CPU), rewrites only their <code>runs-on</code> lines and opens a pull request.</p>
+      </li>
+      <li>
+        <span class="n" aria-hidden="true">3</span>
+        <h3>Take jobs</h3>
+        <pre class="cmd"><code>spareci install</code></pre>
+        <p>Runs spareci in the background, now and at every login. Each job gets a fresh, single-use copy of GitHub's official runner. Logs, checks and artifacts look the same as on hosted runners.</p>
+      </li>
+    </ol>
+
+    <ul class="facts">
+      <li><strong>No inbound connections.</strong> spareci polls GitHub, so it works behind NAT, on Wi-Fi, on a laptop.</li>
+      <li><strong>Local cache.</strong> <code>actions/cache</code> and every <code>setup-*</code> action save to this machine's disk. Saving a 1 GB Go build cache takes seconds, not a minute.</li>
+      <li><strong>Laptop mode.</strong> <code>--only-on-ac</code>, <code>--idle 10m</code> and <code>--hours 18:00-08:00</code> keep jobs off the machine while you're using it.</li>
+      <li><strong>No new infrastructure.</strong> No Kubernetes, no Terraform, no cloud account, no webhook server.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="fallback">
+  <div class="wrap two">
+    <div>
+      <h2>CI never waits on a sleeping laptop</h2>
+      <p>Your jobs only go to your machine while spareci says it's there. Every other time, they run where they always did.</p>
+    </div>
+    <dl class="fallback">
+      <div>
+        <dt>You stop it</dt>
+        <dd><kbd>^C</kbd>, <code>spareci uninstall</code> or laptop mode pausing: new jobs go to GitHub right away, running jobs finish, and jobs still queued here are sent to GitHub-hosted runners.</dd>
+      </div>
+      <div>
+        <dt>It's busy</dt>
+        <dd>A job that waits here longer than <code>--max-wait</code> (10 minutes by default) is sent to GitHub-hosted runners.</dd>
+      </div>
+      <div>
+        <dt>It dies</dt>
+        <dd>Crash, power cut, lid closed. <code>spareci install</code> restarts a crashed process within 10 seconds. If the whole machine is gone, a small watchdog workflow notices the missing heartbeat and re-runs stranded jobs on GitHub, usually within 15 to 20 minutes. It's skipped, and not billed, while spareci is healthy.</dd>
+      </div>
+    </dl>
+  </div>
+</section>
+
+<section id="savings" class="band">
+  <div class="wrap">
+    <h2>What would it save?</h2>
+    <p class="sub">Enter a month of Actions minutes by runner type. Prices are GitHub's list prices per minute, checked <time class="prices-checked" datetime="2026-11-10">November 10, 2026</time> (<a class="prices-source" href="https://docs.github.com/en/billing/reference/actions-runner-pricing">source</a>), the same table <code>spareci estimate</code> uses.</p>
+
+    <noscript><p class="callout">The calculator needs JavaScript. <code>spareci estimate</code> gives you real numbers from your own runs either way.</p></noscript>
+
+    <form class="calc" id="calc" hidden>
+      <fieldset class="hosts">
+        <legend>Machines you'd run spareci on</legend>
+        <label><input type="checkbox" name="host" value="macOS/ARM64" checked> Mac, Apple silicon</label>
+        <label><input type="checkbox" name="host" value="macOS/X64"> Mac, Intel</label>
+        <label><input type="checkbox" name="host" value="Linux/X64"> Linux, x64</label>
+        <label><input type="checkbox" name="host" value="Linux/ARM64"> Linux, arm64</label>
+      </fieldset>
+
+      <div class="rows-head" aria-hidden="true">
+        <span>Runner</span><span>Minutes / month</span><span>GitHub cost</span><span>Fits</span><span></span>
+      </div>
+      <ul class="rows" id="rows"></ul>
+      <button type="button" class="btn small" id="add-row">Add a runner type</button>
+
+      <div class="result" aria-live="polite">
+        <div class="stat">
+          <span class="label">GitHub-hosted cost</span>
+          <span class="value" id="out-cost">$0</span>
+          <span class="per">per month</span>
+        </div>
+        <div class="stat take">
+          <span class="label">spareci could take</span>
+          <span class="value" id="out-save">$0</span>
+          <span class="per" id="out-share">0% of the bill</span>
+        </div>
+        <div class="stat">
+          <span class="label">Over a year</span>
+          <span class="value" id="out-year">$0</span>
+          <span class="per" id="out-mins">0 minutes a month moved</span>
+        </div>
+        <div class="bar" role="img" id="bar" aria-label="">
+          <span class="bar-take" id="bar-take"></span>
+        </div>
+      </div>
+
+      <ul class="notes">
+        <li>A machine takes a job when it has the same OS and CPU architecture. Windows jobs stay on GitHub: spareci runs on macOS and Linux.</li>
+        <li>These are private-repo prices. Standard runners are free in public repos (larger runners are billed even there), and spareci isn't for public repos yet anyway.</li>
+        <li>Your plan's included usage isn't subtracted. Jobs are billed per whole minute, rounded up.</li>
+        <li>One machine running one job at a time has about 43,000 minutes in a month. Busy repos can run several at once with <code>--max</code>.</li>
+      </ul>
+    </form>
+
+    <p class="real">For real numbers, run <code>spareci estimate</code> in a repo. It prices your last 30 days of jobs and says which of them this machine could have taken.</p>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="wrap">
+    <h2>How it compares</h2>
+    <p class="sub">Every option below works. They trade money, setup and isolation differently.</p>
+    <div class="table-scroll" tabindex="0" role="region" aria-labelledby="cmp-cap">
+      <table class="cmp">
+        <caption id="cmp-cap" class="sr-only">spareci compared with other ways to run GitHub Actions jobs</caption>
+        <thead>
+          <tr>
+            <th scope="col"><span class="sr-only">Question</span></th>
+            <th scope="col" class="us">spareci</th>
+            <th scope="col">Plain self-hosted runner</th>
+            <th scope="col">actions-runner-controller</th>
+            <th scope="col">Hosted runner vendors</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">What you pay</th>
+            <td class="us">Nothing beyond the machine and its power</td>
+            <td>Nothing beyond the machine</td>
+            <td>Free software, plus the Kubernetes cluster it runs on</td>
+            <td>Per minute, usually less than GitHub's list price. Check each vendor's pricing.</td>
+          </tr>
+          <tr>
+            <th scope="row">Setup</th>
+            <td class="us">One command, and a pull request it opens for you</td>
+            <td>Download, <code>config.sh</code> per repo or org, run it as a service</td>
+            <td>A Kubernetes cluster, Helm charts, and someone to run them</td>
+            <td>Install their GitHub app, change <code>runs-on</code> labels</td>
+          </tr>
+          <tr>
+            <th scope="row">macOS jobs</th>
+            <td class="us">Yes, on your own Mac</td>
+            <td>Yes, on your own Mac</td>
+            <td>No, runners are Linux containers</td>
+            <td>Varies by vendor</td>
+          </tr>
+          <tr>
+            <th scope="row">Fresh runner per job</th>
+            <td class="us">Yes, single-use runner, but on a shared host</td>
+            <td>No, one long-lived runner unless you set up <code>--ephemeral</code></td>
+            <td>Yes, a new pod per job</td>
+            <td>Yes, usually a VM per job</td>
+          </tr>
+          <tr>
+            <th scope="row">When the machine is down</th>
+            <td class="us">Jobs fall back to GitHub-hosted runners</td>
+            <td>Jobs queue until it's back</td>
+            <td>Jobs queue until the cluster recovers</td>
+            <td>Depends on the vendor's uptime</td>
+          </tr>
+          <tr>
+            <th scope="row">Isolation between jobs</th>
+            <td class="us">Separate home directory only; jobs run as your user. VMs and containers are next.</td>
+            <td>None; jobs run as the runner's user</td>
+            <td>Container per job</td>
+            <td>VM per job, on someone else's hardware</td>
+          </tr>
+          <tr>
+            <th scope="row">Cache</th>
+            <td class="us">On local disk</td>
+            <td>GitHub's cache, over the internet</td>
+            <td>GitHub's cache, unless you add one</td>
+            <td>Varies; some offer faster caches</td>
+          </tr>
+          <tr>
+            <th scope="row">Public repos</th>
+            <td class="us">Not yet, wait for VM isolation</td>
+            <td>GitHub advises against self-hosted runners there</td>
+            <td>Same advice; containers lower the risk</td>
+            <td>Yes</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="table-hint" aria-hidden="true">Scroll sideways for every column.</p>
+  </div>
+</section>
+
+<section id="security" class="band">
+  <div class="wrap two">
+    <div>
+      <h2>Security, honestly</h2>
+      <p>spareci is early. Today every job runs directly on the host, as your user.</p>
+    </div>
+    <div class="sec">
+      <p>Each repo's jobs get their own home directory and a cleaned environment, so they don't see your shell's tokens, your <code>~/.gitconfig</code> or the tools in your home. That keeps jobs out of your personal tool state, not out of your account: a job can still read any file your user can, your SSH keys included. It's the same trust you give a workflow when you run its commands yourself.</p>
+      <ul class="rules">
+        <li class="ok"><strong>Use it with private repos</strong> whose workflows and contributors you trust.</li>
+        <li class="no"><strong>Never with public repos.</strong> A fork's pull request could run code on your machine.</li>
+      </ul>
+      <p>Per-job isolation, VMs on macOS and containers on Linux, is the next major milestone. Public-repo support waits for it. The design is in <a href="https://github.com/Row-Labs/spareci/blob/main/docs/isolation.md">docs/isolation.md</a>.</p>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <h2>Install</h2>
+    <p class="sub">macOS or Linux, arm64 or x64. You'll need the <a href="https://cli.github.com">GitHub CLI</a> logged in and admin rights on the repo, since registering runners needs them.</p>
+
+    <div class="install">
+      <div class="block">
+        <h3>Homebrew</h3>
+        <div class="code"><pre><code>brew install row-labs/tap/spareci</code></pre><button type="button" class="copy" hidden>Copy</button></div>
+      </div>
+      <div class="block">
+        <h3>Prebuilt binary</h3>
+        <div class="code"><pre><code>curl -fsSL https://github.com/Row-Labs/spareci/releases/latest/download/spareci_darwin_arm64.tar.gz | tar xz spareci
+sudo mv spareci /usr/local/bin/</code></pre><button type="button" class="copy" hidden>Copy</button></div>
+        <p class="hint">Swap <code>darwin</code> for <code>linux</code> and <code>arm64</code> for <code>amd64</code> to match your machine.</p>
+      </div>
+      <div class="block">
+        <h3>Go</h3>
+        <div class="code"><pre><code>go install github.com/Row-Labs/spareci/cmd/spareci@latest</code></pre><button type="button" class="copy" hidden>Copy</button></div>
+      </div>
+    </div>
+
+    <h3 class="then">Then, in your repo</h3>
+    <div class="code"><pre><code>spareci estimate   <span class="c"># what your minutes cost, and what this machine could take</span>
+spareci init       <span class="c"># opt jobs in; opens a pull request</span>
+spareci up         <span class="c"># take jobs until ^C (or spareci install to keep it running)</span></code></pre><button type="button" class="copy" hidden>Copy</button></div>
+    <p class="then-foot">Read the <a href="https://github.com/Row-Labs/spareci#readme">README</a> for laptop mode, the watchdog workflow and what a job can see.</p>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="wrap foot-in">
+    <p><strong>spareci</strong> is free, open-source software under the <a href="https://github.com/Row-Labs/spareci/blob/main/LICENSE">MIT license</a>. Not affiliated with GitHub.</p>
+    <p>Prices: <a class="prices-source" href="https://docs.github.com/en/billing/reference/actions-runner-pricing">GitHub Actions runner pricing</a>, checked <time class="prices-checked" datetime="2026-11-10">November 10, 2026</time>. This page has no analytics, cookies or third-party scripts.</p>
+  </div>
+</footer>
+
+<script src="assets/prices.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>
