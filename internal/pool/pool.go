@@ -25,6 +25,7 @@ type Config struct {
 	RouteLabel  string // value written to FallbackVar
 	DryRun      bool
 	Cache       *cache.Server // nil: jobs use GitHub's cache service
+	Gate        Gate          // nil: always take jobs; see gate.go
 }
 
 type Pool struct {
@@ -35,6 +36,10 @@ type Pool struct {
 	mu      sync.Mutex
 	workers map[string]*worker
 	seq     int
+
+	// Laptop mode (gate.go); only touched by the poll loop.
+	paused, routed bool
+	stranded       int
 }
 
 type worker struct {
@@ -71,7 +76,10 @@ func (p *Pool) Matches(j gh.Job) bool {
 // Run polls until ctx is cancelled (stop taking work; finish running jobs)
 // and then until hardCtx is cancelled or every job is done.
 func (p *Pool) Run(ctx, hardCtx context.Context) error {
-	if p.cfg.FallbackVar != "" && !p.cfg.DryRun {
+	if p.cfg.Gate != nil && !p.cfg.Gate.Check().Open {
+		p.routed = true // may be left over from a crash; the first poll clears it
+	} else if p.cfg.FallbackVar != "" && !p.cfg.DryRun {
+		p.routed = true
 		if err := p.gh.SetVariable(hardCtx, p.cfg.Repo, p.cfg.FallbackVar, p.cfg.RouteLabel); err != nil {
 			return fmt.Errorf("set fallback variable %s: %w", p.cfg.FallbackVar, err)
 		}
@@ -102,6 +110,9 @@ func (p *Pool) tick(ctx, hardCtx context.Context) error {
 		if p.Matches(j) {
 			mine = append(mine, j)
 		}
+	}
+	if !p.admit(ctx, len(mine)) {
+		return nil
 	}
 
 	p.mu.Lock()

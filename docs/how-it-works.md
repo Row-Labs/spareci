@@ -7,6 +7,7 @@
 | `cmd/spareci` | CLI: flags, signals, wiring |
 | `internal/gh` | The few GitHub REST calls needed: queued jobs, JIT runners, repo variables |
 | `internal/pool` | Poll loop: decides how many runners to start and drains on shutdown |
+| `internal/gate` | Laptop mode: whether the machine takes jobs now (power, user idle time, hours) |
 | `internal/runner` | Installs `actions/runner`, clones it per job, runs it, patches the worker for the cache |
 | `internal/cache` | Local implementation of GitHub's cache service |
 
@@ -19,6 +20,19 @@
 5. The clone is deleted. If the runner never got a job, its registration is deleted too.
 
 Routing: on start, spareci sets the repo variable `SPARECI_RUNS_ON` to its label, so `runs-on: ${{ vars.SPARECI_RUNS_ON || 'ubuntu-24.04' }}` resolves to this machine. On `^C`, it deletes the variable first, so new jobs go to GitHub, then waits for running jobs.
+
+## Laptop mode
+
+`internal/gate` turns `--only-on-ac`, `--idle` and `--hours` into one open/closed answer. Probes (power source, idle time, clock) are plain functions, so the logic is tested with fakes; `probes_darwin.go` and `probes_linux.go` hold the real ones, and the output parsers are tested on every OS.
+
+The pool asks the gate once per poll, before spawning (`internal/pool/gate.go`):
+
+- **Open → closed:** delete the routing variable, cancel runners that haven't started a job, and spawn nothing. Running jobs continue.
+- **Closed → open:** set the routing variable again and spawn as usual.
+- A failed variable update is retried on the next poll. A probe that fails mid-run keeps its last reading, with one warning; at start, `spareci up` refuses a condition it can't measure.
+- If the gate is closed at start, the variable is cleared rather than set, in case a crash left it behind.
+
+The up process writes the gate's state to `<cache dir>/spareci/state/<owner>_<repo>.gate.json`, which `spareci status` reads while that process is alive.
 
 ## Local cache
 

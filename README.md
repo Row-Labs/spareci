@@ -45,6 +45,29 @@ spareci down               # after a crash: route jobs back to GitHub, remove st
 
 Press `^C` once and spareci routes new jobs back to GitHub and lets running jobs finish. Press it twice and running jobs are aborted.
 
+### Laptop mode
+
+On a machine you also work on, tell spareci when it may take jobs:
+
+```sh
+spareci up --only-on-ac            # not on battery
+spareci up --idle 10m              # only after 10 minutes without keyboard or mouse input
+spareci up --hours 18:00-08:00     # only in this local-time window (may cross midnight)
+spareci up --only-on-ac --idle 5m --hours 18:00-08:00   # all must hold
+```
+
+When a condition stops holding, spareci clears `SPARECI_RUNS_ON` so new jobs go to GitHub-hosted runners, stops runners that haven't picked up a job, and lets running jobs finish. When the conditions hold again, it routes jobs here again. Each change is logged, and `spareci status` shows whether the machine is taking jobs or paused, and why.
+
+A job's `runs-on` is decided when it's queued. Jobs that were queued for this machine just before it paused wait until it resumes; spareci logs how many.
+
+| | macOS | Linux |
+|---|---|---|
+| `--only-on-ac` | `pmset` | `/sys/class/power_supply`; a machine with no battery counts as on AC |
+| `--idle` | `HIDIdleTime` (any keyboard, mouse or trackpad input) | best effort: GNOME's idle monitor, then `xprintidle` (X11), then logind's idle hint. Needs your desktop session, so it may not work from a system service. |
+| `--hours` | local clock | local clock |
+
+If this machine can't measure a condition you asked for, `spareci up` says so and exits instead of ignoring it.
+
 Route only the jobs you want. A job is sent here when its `runs-on` labels are all ones this machine has: `self-hosted`, the OS (`macOS` or `Linux`), the arch (`ARM64` or `X64`) and `spareci` (change it with `--label`). The `vars.SPARECI_RUNS_ON || ...` form is what gives you the fallback, and spareci sets and clears that variable for you.
 
 ## How it works

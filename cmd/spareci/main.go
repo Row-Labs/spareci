@@ -29,6 +29,7 @@ const usage = `spareci: run your GitHub Actions jobs on your own machine.
 Usage:
   spareci up     [--repo owner/name] [--label spareci] [--max 1] [--dry-run]
                  [--cache=true] [--cache-size 10GB]
+                 [--only-on-ac] [--idle 10m] [--hours 18:00-08:00]
   spareci status [--repo owner/name]
   spareci down   [--repo owner/name]   clear routing and stale runners after a crash
   spareci cache  ls|clear [--repo owner/name]
@@ -105,11 +106,16 @@ func up(args []string) error {
 	useCache := fs.Bool("cache", true, "serve actions/cache from this machine's disk instead of GitHub")
 	cacheSize := fs.String("cache-size", "10GB", "local cache size before least recently used entries are evicted")
 	upstream := fs.String("cache-upstream", cache.DefaultUpstream, "GitHub results service, for calls the local cache passes through (artifacts)")
+	laptop := laptopFlags(fs)
 	_ = fs.Parse(args)
 	if *verbose {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
 	if err := c.resolve(); err != nil {
+		return err
+	}
+	g, err := laptop.gate(c.repo)
+	if err != nil {
 		return err
 	}
 	client, err := gh.New()
@@ -163,7 +169,12 @@ func up(args []string) error {
 		RouteLabel:  c.label,
 		DryRun:      *dry,
 		Cache:       cacheSrv,
+		Gate:        poolGate(g),
 	}, client, host)
+	if g != nil {
+		slog.Info("laptop mode: taking jobs only when conditions are met", "when", g.Config().String())
+		defer removeGateState(c.repo)
+	}
 	return p.Run(soft, hard)
 }
 
@@ -184,6 +195,7 @@ func status(args []string) error {
 		return err
 	}
 	fmt.Printf("repo: %s\n", c.repo)
+	printGateState(c.repo)
 	fmt.Printf("self-hosted runners: %d\n", len(runners))
 	for _, r := range runners {
 		fmt.Printf("  %-40s %-8s busy=%v\n", r.Name, r.Status, r.Busy)
