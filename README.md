@@ -13,7 +13,7 @@ runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }}
 
 While `spareci up` is running, that job runs on your machine for free. Stop it, and the same job runs on GitHub-hosted runners again. CI never sits waiting on a laptop that's asleep.
 
-> **Status: early.** Jobs run directly on the host as your user (see [Security](#security)). Use it for private repos whose workflows you trust.
+> **Status: early.** Jobs run directly on the host as your user, with a separate home directory (see [Security](#security)). Use it for private repos whose workflows you trust.
 
 ## Why
 
@@ -39,6 +39,7 @@ spareci up                 # take jobs for this repo; ^C to stop
 spareci up --max 2         # run two jobs at once
 spareci up --dry-run       # show which queued jobs would come here, register nothing
 spareci status             # runners and queued jobs
+spareci up --job-home=user # give jobs your own HOME and environment, as before
 spareci cache ls           # what's in the local cache
 spareci down               # after a crash: route jobs back to GitHub, remove stale runners
 ```
@@ -87,16 +88,33 @@ See [docs/how-it-works.md](docs/how-it-works.md) for the details, including how 
 
 ## Security
 
-Today every job runs as your user on the host, with access to whatever your user can reach. That's the same trust model as running the workflow's commands yourself, so:
+Every job runs as your user on the host. By default it gets its own home directory and a cleaned environment (see [What a job can see](#what-a-job-can-see)), but that keeps jobs out of your personal tool state, not out of your account: a job can still read anything your user can read. That's the same trust model as running the workflow's commands yourself, so:
 
 - Use spareci only with **private repos** whose workflows and contributors you trust.
 - **Never with public repos.** A fork's pull request could run code on your machine.
 
-Per-job VM isolation (Tart on macOS, containers or microVMs on Linux) is the next major milestone, and public-repo support will wait for it.
+Per-job VM and container isolation is the next major milestone, and public-repo support waits for it. See [docs/isolation.md](docs/isolation.md) for the design.
+
+## What a job can see
+
+By default (`--job-home=spareci`) each repo's jobs get a persistent home of their own, `~/Library/Caches/spareci/home/<owner>/<repo>` (`~/.cache/spareci/home/...` on Linux). It's shared by that repo's jobs, so tool caches stay warm between runs, and it's separate from yours.
+
+| | Separate from you | Notes |
+|---|---|---|
+| `HOME` and everything tools keep under it: `~/go`, Go build cache, `~/.npm`, `~/.cargo`, `~/.rustup`, pip cache, `~/.gitconfig`, `~/.npmrc`, `~/.docker/config.json` | Yes | Tools find their paths from `HOME`, so `setup-go` and friends cache the job home, not yours. |
+| Your shell environment (`GOPATH`, `CARGO_HOME`, `XDG_*`, `GH_TOKEN`, `SSH_AUTH_SOCK`, ...) | Yes | Jobs get only locale, `TMPDIR`, proxy and CA settings, `DEVELOPER_DIR`, `DOCKER_HOST` and `PATH`. |
+| Tools installed in your home (rustup, nvm, pyenv, `~/go/bin`, `~/.local/bin`) | Yes | Those `PATH` entries are removed. Install toolchains in the workflow (`setup-node`, `dtolnay/rust-toolchain`, ...) as on hosted runners. Homebrew and other system-wide installs still work. |
+| git's system config | Yes | `GIT_CONFIG_NOSYSTEM=1`, which also turns off the macOS keychain credential helper Xcode's and Homebrew's git enable. `actions/checkout` uses the job's own token. |
+| macOS keychain | Partly | The job home has no keychain search list, so the default lookups find nothing. The login keychain is still unlocked in your session and readable by path. |
+| SSH keys and `~/.ssh/config` | No | `ssh` finds your home from the user database, not `HOME`. |
+| Xcode: DerivedData, simulators, signing identities | No | Xcode also ignores `HOME`. Pass `-derivedDataPath` to keep builds out of `~/Library/Developer`. |
+| Everything else your user can read or write | No | Files, Docker daemon, local network. |
+
+`--job-home=user` restores the old behaviour: your own `HOME` and your full environment. `--job-home=/some/path` uses that directory instead. To reset a repo's job home, delete its directory while spareci is stopped.
 
 ## Limits
 
-- Jobs share your home directory, so tools' own caches (`~/go`, `~/.npm`, `~/.cargo`, ...) are your personal ones, and `setup-*` actions will cache them. A separate job home is part of the isolation work.
+- Jobs in the same repo share their job home, and so do concurrent jobs (`--max 2`). Whatever one job leaves there, the next one sees.
 - One repo per `spareci up` process.
 - Jobs using `container:` or Docker container actions can't reach the local cache yet; they fall back to GitHub's cache.
 - Without the watchdog workflow, if spareci dies without `^C` (crash, power loss), jobs queue for this machine until it starts again or you run `spareci down`. `spareci install` restarts it after a crash, but can't help when the machine itself is off.
