@@ -15,7 +15,7 @@ import (
 // Source is the slice of the GitHub API an estimate reads. *gh.Client has it.
 type Source interface {
 	Runs(ctx context.Context, repo string, from, to time.Time) ([]gh.Run, error)
-	RunJobs(ctx context.Context, repo string, runID int64) ([]gh.RunJob, error)
+	AllRunJobs(ctx context.Context, repo string, runID int64) ([]gh.RunJob, error)
 }
 
 // Job is a finished job and the repo it ran in.
@@ -113,7 +113,7 @@ func runJobs(ctx context.Context, src Source, repo string, id int64) ([]gh.RunJo
 	var err error
 	for attempt := range 3 {
 		var js []gh.RunJob
-		if js, err = src.RunJobs(ctx, repo, id); err == nil {
+		if js, err = src.AllRunJobs(ctx, repo, id); err == nil {
 			return js, nil
 		}
 		var ae *gh.APIError

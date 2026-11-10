@@ -261,7 +261,7 @@ func TestJobsPaginate(t *testing.T) {
 		fmt.Fprintf(w, `{"total_count":150,"jobs":[%s]}`, strings.Join(jobs, ","))
 	}))
 	defer srv.Close()
-	jobs, err := gh.NewWith("t", srv.URL, srv.Client()).RunJobs(context.Background(), "acme/app", 1)
+	jobs, err := gh.NewWith("t", srv.URL, srv.Client()).AllRunJobs(context.Background(), "acme/app", 1)
 	if err != nil {
 		t.Fatal(err)
 	}

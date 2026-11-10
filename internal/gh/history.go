@@ -45,14 +45,6 @@ func (c *Client) OrgRepos(ctx context.Context, org string) ([]Repo, error) {
 	}
 }
 
-type Run struct {
-	ID         int64     `json:"id"`
-	Name       string    `json:"name"`
-	RunAttempt int       `json:"run_attempt"`
-	Status     string    `json:"status"`
-	CreatedAt  time.Time `json:"created_at"`
-}
-
 // runsCap is how many results GitHub returns for a filtered run listing,
 // however many pages are asked for.
 const runsCap = 1000
@@ -106,8 +98,9 @@ type RunJob struct {
 	RunnerGroupName string     `json:"runner_group_name"`
 }
 
-// RunJobs lists every job of every attempt of a run.
-func (c *Client) RunJobs(ctx context.Context, repo string, runID int64) ([]RunJob, error) {
+// AllRunJobs lists every job of every attempt of a run; RunJobs only sees
+// the latest attempt.
+func (c *Client) AllRunJobs(ctx context.Context, repo string, runID int64) ([]RunJob, error) {
 	var all []RunJob
 	for page := 1; ; page++ {
 		var resp struct {
