@@ -111,9 +111,43 @@ spareci up --job-home=user # give jobs your own HOME and environment, as before
 spareci cache ls           # what's in the local cache
 spareci down               # after a crash: route jobs back to GitHub, remove stale runners
 spareci estimate           # what your Actions minutes cost, and what this machine could save
+spareci stats              # what the jobs this machine ran would have cost on GitHub
 ```
 
 Press `^C` once and spareci routes new jobs back to GitHub, lets running jobs finish, and then sends any job still queued for this machine to GitHub-hosted runners. Press it twice and running jobs are aborted.
+
+### What did it save?
+
+Every job `spareci up` runs is recorded, along with the GitHub-hosted runner it would have used otherwise:
+
+```sh
+spareci stats
+spareci stats --json
+```
+
+```
+spareci saved you $1.77 · 6 jobs · 28 min since Oct 20, 2026
+
+                         JOBS   MINUTES      SAVED
+  This week                 4        16      $1.03
+  This month                5        21      $1.34
+  All time                  6        28      $1.77
+
+  BY REPO
+  acme/app                  4        23      $1.77
+  acme/site                 1         3 free (public)
+  acme/api                  1         2      $0.00
+
+  INSTEAD OF
+  macOS 5-core M2 Pro       1        10      $1.02
+  macOS standard            2        12      $0.74
+  Linux 2-core              2         4      $0.01
+  Self-hosted               1         2      $0.00
+```
+
+The runner a job would have used is its fallback, the `'macos-15'` in `${{ vars.SPARECI_RUNS_ON || 'macos-15' }}`, read from the workflow file at the run's commit. Jobs are priced exactly as `spareci estimate` prices them: GitHub's timestamps, rounded up to the whole minute, at list price, free for standard runners in public repos. A job whose fallback spareci can't read (a `matrix.os` expression, a reusable workflow, a custom runner label) isn't priced or guessed; `stats` counts it separately and `--json` says why. Weeks start on Monday and months on the 1st, in local time. Each finished job also logs a line like `saved $0.43: 7 min on macOS standard; $1.77 in all over 6 jobs`.
+
+The record is a local file, `~/Library/Caches/spareci/stats/jobs.jsonl` (`~/.cache/spareci/stats/` on Linux), one line per job, shared by every repo on the machine. It stays on this machine.
 
 ### Laptop mode
 

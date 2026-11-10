@@ -45,6 +45,7 @@ Usage:
   spareci down      [--repo owner/name]   route jobs back to GitHub after a crash
   spareci cache     ls|clear [--repo owner/name]
   spareci estimate  [--repo owner/name]... [--org name] [--days 30] [--json]
+  spareci stats     [--json]   what the jobs this machine ran would have cost on GitHub
   spareci version
 
 In your workflow (spareci init does this), route jobs here when spareci is up,
@@ -80,6 +81,8 @@ func main() {
 		err = cacheCmd(os.Args[2:])
 	case "estimate":
 		err = estimateCmd(os.Args[2:])
+	case "stats":
+		err = statsCmd(os.Args[2:])
 	case "version", "--version":
 		fmt.Println("spareci", version)
 	case "-h", "--help", "help":
@@ -231,6 +234,7 @@ func up(args []string) error {
 		DryRun:   *dry,
 		Cache:    cacheSrv,
 		Gate:     poolGate(g),
+		Stats:    recorder(*dry, client, c, host.Root),
 	}, client, host)
 	if g != nil {
 		slog.Info("laptop mode: taking jobs only when conditions are met", "when", g.Config().String())

@@ -1,0 +1,26 @@
+{
+  "id": 130137251602,
+  "run_id": 42904037716,
+  "workflow_name": "CI",
+  "head_branch": "main",
+  "run_url": "https://api.github.com/repos/Row-Labs/spareci/actions/runs/42904037716",
+  "run_attempt": 1,
+  "node_id": "CR_kwDOVpp7HM8AAAAeTMjfEg",
+  "head_sha": "0a593c585c1d327ae8e5bc2b0c6466d3f7467b6e",
+  "url": "https://api.github.com/repos/Row-Labs/spareci/actions/jobs/130137251602",
+  "html_url": "https://github.com/Row-Labs/spareci/actions/runs/42904037716/job/130137251602",
+  "status": "completed",
+  "conclusion": "success",
+  "created_at": "2026-11-10T21:20:16Z",
+  "started_at": "2026-11-10T21:20:30Z",
+  "completed_at": "2026-11-10T21:20:47Z",
+  "name": "build",
+  "check_run_url": "https://api.github.com/repos/Row-Labs/spareci/check-runs/130137251602",
+  "labels": [
+    "spareci"
+  ],
+  "runner_id": 23,
+  "runner_name": "spareci-Eventric-1794345622-2",
+  "runner_group_id": 1,
+  "runner_group_name": "Default"
+}

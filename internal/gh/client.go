@@ -189,6 +189,23 @@ type Run struct {
 	RunAttempt   int       `json:"run_attempt"`
 	RunStartedAt time.Time `json:"run_started_at"` // of the latest attempt
 	HTMLURL      string    `json:"html_url"`
+	Name         string    `json:"name"`     // the workflow's name
+	Path         string    `json:"path"`     // workflow file, e.g. .github/workflows/ci.yml
+	HeadSHA      string    `json:"head_sha"` // commit the run's workflow file was read at
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// ListRuns is the repo's most recent runs (status "" for any), newest first.
+func (c *Client) ListRuns(ctx context.Context, repo, status string) ([]Run, error) {
+	var resp struct {
+		WorkflowRuns []Run `json:"workflow_runs"`
+	}
+	path := fmt.Sprintf("/repos/%s/actions/runs?per_page=50", repo)
+	if status != "" {
+		path = fmt.Sprintf("/repos/%s/actions/runs?status=%s&per_page=50", repo, status)
+	}
+	err := c.do(ctx, "GET", path, nil, &resp)
+	return resp.WorkflowRuns, err
 }
 
 func (c *Client) GetRun(ctx context.Context, repo string, runID int64) (Run, error) {

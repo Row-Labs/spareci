@@ -75,3 +75,10 @@ func fmtInt(n int) string {
 	}
 	return s
 }
+
+// Money formats dollars the way the estimate does: cents below $100, whole
+// dollars above.
+func Money(v float64) string { return money(v) }
+
+// FmtInt formats n with thousands separators.
+func FmtInt(n int) string { return fmtInt(n) }

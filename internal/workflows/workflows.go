@@ -46,6 +46,12 @@ type Job struct {
 	// Fit and Why say whether this machine suits the job, set by Assess.
 	Fit Fit
 	Why string
+	// DisplayName is the job's name: as written, if it has one.
+	DisplayName string
+	// Fallback is the runs-on a routed job gets while spareci is down: the
+	// labels after "vars.SPARECI_RUNS_ON ||". FallbackErr says why it's nil.
+	Fallback    []string
+	FallbackErr string
 
 	container bool // uses container: or services:
 	edit      *edit
@@ -111,6 +117,9 @@ func Parse(path string, src []byte, varName string) (*File, error) {
 			continue
 		}
 		j.container = lookup(body, "container") != nil || lookup(body, "services") != nil
+		if n := lookup(body, "name"); n != nil && n.Kind == yaml.ScalarNode {
+			j.DisplayName = n.Value
+		}
 		k, v := lookupPair(body, "runs-on")
 		if v == nil {
 			if lookup(body, "uses") != nil {
@@ -122,6 +131,7 @@ func Parse(path string, src []byte, varName string) (*File, error) {
 		}
 		j.Line = k.Line
 		j.RunsOn = strings.TrimSpace(sourceText(lines, k, v))
+		j.Fallback, j.FallbackErr = fallbackOf(v, varName)
 		j.Labels, j.Skip = labels(v, varName)
 		if j.Skip != "" {
 			continue
