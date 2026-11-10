@@ -193,23 +193,23 @@ func (r *Router) Rescue(ctx context.Context, runID int64, force bool) error {
 	} else {
 		err = r.API.RerunFailedJobs(ctx, r.Repo, runID)
 	}
-	var attempt int
+	var next gh.Run
 	if err == nil {
-		attempt, err = r.waitAttempt(ctx, runID, run.RunAttempt)
+		next, err = r.waitAttempt(ctx, runID, run.RunAttempt)
 	}
 	if err == nil && !whole {
-		// GitHub has been seen to leave a cancelled job out of a failed-jobs
-		// re-run (run 42889578581: of two queued jobs cancelled together,
+		// GitHub has left a cancelled job out of a failed-jobs re-run (runs
+		// 42889578581 and 42891078116: of two queued jobs cancelled together,
 		// only one was re-run), which ends the run as cancelled. If that
 		// happens, cancel the new attempt and re-run everything.
-		if left := r.leftBehind(ctx, runID, attempt); left != "" {
+		if left := r.leftBehind(ctx, runID, next.RunStartedAt); left != "" {
 			slog.Warn("re-run skipped a cancelled job; re-running the whole run", "run", runID, "job", left)
 			err = r.cancel(ctx, runID)
 			if err == nil {
 				err = r.API.RerunRun(ctx, r.Repo, runID)
 			}
 			if err == nil {
-				_, err = r.waitAttempt(ctx, runID, attempt)
+				_, err = r.waitAttempt(ctx, runID, next.RunAttempt)
 			}
 		}
 	}
@@ -261,18 +261,22 @@ func (r *Router) cancel(ctx context.Context, runID int64) error {
 	return nil
 }
 
-// leftBehind names a cancelled job that the re-run creating attempt didn't
-// include, after giving GitHub a few polls to list the new jobs.
-func (r *Router) leftBehind(ctx context.Context, runID int64, attempt int) string {
+// leftBehind names a cancelled job that the attempt starting at started
+// didn't re-run. GitHub lists such a job under the new attempt number, but
+// it finished before the attempt began.
+func (r *Router) leftBehind(ctx context.Context, runID int64, started time.Time) string {
+	if started.IsZero() {
+		return ""
+	}
 	left := ""
-	for range 5 {
+	for range 3 {
 		jobs, err := r.API.RunJobs(ctx, r.Repo, runID)
 		if err != nil {
 			return ""
 		}
 		left = ""
 		for _, j := range jobs {
-			if j.RunAttempt < attempt && j.Status == "completed" && j.Conclusion == "cancelled" {
+			if j.Status == "completed" && j.Conclusion == "cancelled" && j.CompletedAt.Before(started) {
 				left = j.Name
 			}
 		}
@@ -313,21 +317,21 @@ func (r *Router) waitCompleted(ctx context.Context, runID int64, limit time.Dura
 	}
 }
 
-// waitAttempt returns the re-run's attempt number once it exists, which is
+// waitAttempt returns the run once the re-run's attempt exists, which is
 // when GitHub has read the repo variables for it.
-func (r *Router) waitAttempt(ctx context.Context, runID int64, prev int) (int, error) {
+func (r *Router) waitAttempt(ctx context.Context, runID int64, prev int) (gh.Run, error) {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		run, err := r.API.GetRun(ctx, r.Repo, runID)
 		if err == nil && run.RunAttempt > prev {
-			return run.RunAttempt, nil
+			return run, nil
 		}
 		if time.Now().After(deadline) {
-			return 0, fmt.Errorf("run %d: no new attempt after re-run", runID)
+			return gh.Run{}, fmt.Errorf("run %d: no new attempt after re-run", runID)
 		}
 		select {
 		case <-ctx.Done():
-			return 0, ctx.Err()
+			return gh.Run{}, ctx.Err()
 		case <-time.After(r.poll()):
 		}
 	}

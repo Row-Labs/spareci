@@ -122,16 +122,17 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 }
 
 type Job struct {
-	ID         int64     `json:"id"`
-	RunID      int64     `json:"run_id"`
-	Name       string    `json:"name"`
-	Status     string    `json:"status"`
-	Labels     []string  `json:"labels"`
-	RunnerName string    `json:"runner_name"`
-	HTMLURL    string    `json:"html_url"`
-	RunAttempt int       `json:"run_attempt"`
-	Conclusion string    `json:"conclusion"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID          int64     `json:"id"`
+	RunID       int64     `json:"run_id"`
+	Name        string    `json:"name"`
+	Status      string    `json:"status"`
+	Labels      []string  `json:"labels"`
+	RunnerName  string    `json:"runner_name"`
+	HTMLURL     string    `json:"html_url"`
+	RunAttempt  int       `json:"run_attempt"`
+	Conclusion  string    `json:"conclusion"`
+	CreatedAt   time.Time `json:"created_at"`
+	CompletedAt time.Time `json:"completed_at"`
 }
 
 // QueuedJobs returns every queued job in the repo. A run whose first job is
@@ -177,10 +178,11 @@ func (c *Client) RunJobs(ctx context.Context, repo string, runID int64) ([]Job, 
 }
 
 type Run struct {
-	ID         int64  `json:"id"`
-	Status     string `json:"status"`
-	RunAttempt int    `json:"run_attempt"`
-	HTMLURL    string `json:"html_url"`
+	ID           int64     `json:"id"`
+	Status       string    `json:"status"`
+	RunAttempt   int       `json:"run_attempt"`
+	RunStartedAt time.Time `json:"run_started_at"` // of the latest attempt
+	HTMLURL      string    `json:"html_url"`
 }
 
 func (c *Client) GetRun(ctx context.Context, repo string, runID int64) (Run, error) {

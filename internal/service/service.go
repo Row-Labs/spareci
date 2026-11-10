@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Spec is one service: `spareci up` for one repo.
@@ -190,7 +191,7 @@ func Install(s Spec) (string, error) {
 	content := Unit(s)
 	if runtime.GOOS == "darwin" {
 		content = Plist(s)
-		_ = launchctl("bootout", launchdTarget(s.Repo)) // not loaded is fine
+		unloadLaunchd(s.Repo)
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return "", err
@@ -218,7 +219,7 @@ func Uninstall(repo string) (bool, error) {
 		return false, nil
 	}
 	if runtime.GOOS == "darwin" {
-		_ = launchctl("bootout", launchdTarget(repo))
+		unloadLaunchd(repo)
 	} else {
 		_ = systemctl("disable", "--now", Name(repo)+".service")
 	}
@@ -278,6 +279,20 @@ func repoArg(file string) string {
 		}
 	}
 	return ""
+}
+
+// unloadLaunchd stops and unloads the agent if it's loaded. bootout returns
+// before the job is gone, and bootstrapping it again meanwhile fails with
+// "Input/output error", so wait until launchd no longer knows it (spareci
+// gets up to ExitTimeOut to shut down cleanly).
+func unloadLaunchd(repo string) {
+	if launchctl("bootout", launchdTarget(repo)) != nil {
+		return // not loaded
+	}
+	deadline := time.Now().Add(70 * time.Second)
+	for time.Now().Before(deadline) && launchctl("print", launchdTarget(repo)) == nil {
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func launchdDomain() string            { return fmt.Sprintf("gui/%d", os.Getuid()) }

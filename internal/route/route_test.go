@@ -22,19 +22,23 @@ type fake struct {
 	stuck   bool   // ignore normal cancel, like a run held by a dead runner
 	skip    string // a job a failed-jobs re-run leaves out, as GitHub once did
 	routing string // value of SPARECI_RUNS_ON when the re-run was created
+	clock   time.Time
 }
 
 func (f *fake) cancelJobs() {
 	for i := range f.jobs {
 		if f.jobs[i].Status != "completed" {
-			f.jobs[i].Status, f.jobs[i].Conclusion = "completed", "cancelled"
+			f.jobs[i].Status, f.jobs[i].Conclusion, f.jobs[i].CompletedAt = "completed", "cancelled", f.tick()
 		}
 	}
 }
 
 func newFake() *fake {
-	return &fake{vars: map[string]string{}, run: gh.Run{ID: 7, Status: "queued", RunAttempt: 1}}
+	return &fake{vars: map[string]string{}, run: gh.Run{ID: 7, Status: "queued", RunAttempt: 1}, clock: time.Unix(1000, 0)}
 }
+
+// tick is the fake's clock: each GitHub action happens a second later.
+func (f *fake) tick() time.Time { f.clock = f.clock.Add(time.Second); return f.clock }
 
 func (f *fake) log(s string) { f.calls = append(f.calls, s) }
 
@@ -96,11 +100,14 @@ func (f *fake) rerun(kind string) error {
 	f.routing = f.vars["SPARECI_RUNS_ON"]
 	f.run.RunAttempt++
 	f.run.Status = "queued"
+	f.run.RunStartedAt = f.tick()
 	for i, j := range f.jobs {
 		again := kind == "rerun-all" || (j.Conclusion != "success" && j.Name != f.skip)
 		if again {
-			f.jobs[i] = gh.Job{Name: j.Name, Status: "queued", RunAttempt: f.run.RunAttempt, Labels: []string{"ubuntu-24.04"}}
+			f.jobs[i] = gh.Job{Name: j.Name, Status: "queued", Labels: []string{"ubuntu-24.04"}}
 		}
+		// Like GitHub, list every job under the new attempt number, re-run or not.
+		f.jobs[i].RunAttempt = f.run.RunAttempt
 	}
 	return nil
 }
@@ -166,8 +173,8 @@ func TestRescueReRunsEverythingIfGitHubSkipsAJob(t *testing.T) {
 		t.Errorf("calls %v, want %v", got, want)
 	}
 	for _, j := range f.jobs {
-		if j.RunAttempt != 3 {
-			t.Errorf("job %s left at attempt %d", j.Name, j.RunAttempt)
+		if j.Status != "queued" || j.Labels[0] != "ubuntu-24.04" {
+			t.Errorf("job %s not re-run on GitHub: %+v", j.Name, j)
 		}
 	}
 	if f.routing != "" {

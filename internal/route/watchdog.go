@@ -133,9 +133,10 @@ jobs:
             # GitHub has been seen to leave a cancelled job out of a failed-jobs
             # re-run. If it did, cancel the new attempt and re-run everything.
             sleep 10
-            attempt=$(gh api "repos/$REPO/actions/runs/$run" --jq .run_attempt)
+            # Such a job is listed under the new attempt but finished before it began.
+            started=$(gh api "repos/$REPO/actions/runs/$run" --jq .run_started_at)
             left=$(gh api "repos/$REPO/actions/runs/$run/jobs?filter=latest&per_page=100" |
-              jq --argjson a "$attempt" '[.jobs[] | select(.run_attempt < $a and .conclusion == "cancelled")] | length')
+              jq --arg s "$started" '[.jobs[] | select(.conclusion == "cancelled" and .completed_at < $s)] | length')
             if [ "$left" -gt 0 ]; then
               echo "run $run: re-run left $left cancelled job(s) out; re-running the whole run"
               cancel "$run"
