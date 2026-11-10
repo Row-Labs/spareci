@@ -1,0 +1,11 @@
+name: init e2e (scratch)
+on: workflow_dispatch
+jobs:
+  mac-build:
+    runs-on: macos-15 # the job init should convert
+    steps:
+      - run: echo hi
+  linux-lint:
+    runs-on: [ubuntu-24.04]
+    steps:
+      - run: echo hi
