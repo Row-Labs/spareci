@@ -21,6 +21,31 @@ GitHub-hosted runners bill by the minute, and macOS minutes cost about 10x Linux
 
 spareci is the missing middle: one command, ephemeral runners, and automatic fallback.
 
+## What would it save?
+
+Before installing anything, see what your Actions minutes cost and how much of that this machine could take:
+
+```sh
+spareci estimate                          # the repo in the current directory, last 30 days
+spareci estimate --repo you/app --repo you/api --days 90
+spareci estimate --org your-org --json    # every repo the token can see, as JSON
+```
+
+```
+you/app · Oct 11 – Nov 10 (30 days) · 225 runs, 806 jobs
+
+  RUNNER                   JOBS   MINUTES           COST  THIS MACHINE
+  macOS standard            526     2,091           $130  yes
+  Linux 2-core              279       969          $5.81  no
+  Self-hosted                 1         7          $0.00  already
+  Total, GitHub-hosted              3,060           $135
+
+≈ $135/month on GitHub-hosted runners.
+This machine (macOS ARM64) could take 2,091 of those minutes: ≈ $130/month saved.
+```
+
+It reads your runs and jobs through the GitHub API and changes nothing. Each job is priced the way GitHub bills it: rounded up to the whole minute, at the list price for its runner type, with standard runners free in public repos. Prices come from [GitHub's pricing page](https://docs.github.com/en/billing/reference/actions-runner-pricing) and are dated in `internal/estimate/prices.go`. "This machine" means same OS and CPU architecture. Your plan's included usage ($12 to $300 a month) is not subtracted, and larger runners are priced only when their label gives the size (`ubuntu-8-core`). It makes one API request per run, so `--org` over a busy org can take a few minutes; it stops early rather than use up your hourly rate limit.
+
 ## Install
 
 Requires macOS or Linux (arm64 or x64), the [`gh` CLI](https://cli.github.com) logged in, and admin rights on the repo (registering runners needs them).
@@ -42,6 +67,7 @@ spareci status             # runners and queued jobs
 spareci up --job-home=user # give jobs your own HOME and environment, as before
 spareci cache ls           # what's in the local cache
 spareci down               # after a crash: route jobs back to GitHub, remove stale runners
+spareci estimate           # what your Actions minutes cost, and what this machine could save
 ```
 
 Press `^C` once and spareci routes new jobs back to GitHub, lets running jobs finish, and then sends any job still queued for this machine to GitHub-hosted runners. Press it twice and running jobs are aborted.

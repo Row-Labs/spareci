@@ -41,6 +41,7 @@ Usage:
   spareci status    [--repo owner/name]
   spareci down      [--repo owner/name]   route jobs back to GitHub after a crash
   spareci cache     ls|clear [--repo owner/name]
+  spareci estimate  [--repo owner/name]... [--org name] [--days 30] [--json]
   spareci version
 
 In your workflow, route jobs here when spareci is up, and to GitHub otherwise:
@@ -71,6 +72,8 @@ func main() {
 		err = watchdog(os.Args[2:])
 	case "cache":
 		err = cacheCmd(os.Args[2:])
+	case "estimate":
+		err = estimateCmd(os.Args[2:])
 	case "version", "--version":
 		fmt.Println("spareci", version)
 	case "-h", "--help", "help":
