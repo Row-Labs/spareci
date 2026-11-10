@@ -1,0 +1,22 @@
+acme/app, acme/site · Oct 11 – Nov 10 (30 days) · 3 runs, 11 jobs
+
+  RUNNER                   JOBS   MINUTES           COST  THIS MACHINE
+  macOS 5-core M2 Pro         1        10          $1.02  yes
+  macOS standard              2         7          $0.43  yes
+  Linux 8-core                1         5          $0.11  no
+  Windows 2-core              1         3          $0.03  no
+  Linux 4-core                1         2          $0.02  no
+  Linux 2-core                2         8          $0.01  no
+  Linux 2-core arm64          1         1          $0.01  no
+  Larger, size unknown        1         5              ?  ?
+  Self-hosted                 1         8          $0.00  already
+  Total, GitHub-hosted                 36          $1.63
+
+≈ $1.63/month on GitHub-hosted runners.
+This machine (macOS ARM64) could take 17 of those minutes: ≈ $1.45/month saved.
+
+GitHub list prices, checked 2026-11-10: https://docs.github.com/en/billing/reference/actions-runner-pricing
+- List prices. Your plan's included usage ($12/mo Free, $18 Pro and Team, $300 Enterprise Cloud) comes off the bill first, so a small bill may already be $0.
+- 19 min need another OS (macOS jobs need a Mac; spareci doesn't run Windows jobs).
+- 5 min ran on larger runners whose size their name doesn't give; they aren't priced.
+- One machine runs jobs one or a few at a time, so moving them can make CI slower when many run at once.

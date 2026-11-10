@@ -5,10 +5,11 @@
 | Package | Job |
 |---|---|
 | `cmd/spareci` | CLI: flags, signals, wiring |
-| `internal/gh` | The few GitHub REST calls needed: queued jobs, JIT runners, repo variables |
+| `internal/gh` | The few GitHub REST calls needed: queued jobs, JIT runners, repo variables, run history |
 | `internal/pool` | Poll loop: decides how many runners to start and drains on shutdown |
 | `internal/runner` | Installs `actions/runner`, clones it per job, runs it, patches the worker for the cache |
 | `internal/cache` | Local implementation of GitHub's cache service |
+| `internal/estimate` | `spareci estimate`: prices recent jobs at GitHub's list prices |
 
 ## Job lifecycle
 
@@ -36,6 +37,18 @@ Routing: on start, spareci sets the repo variable `SPARECI_RUNS_ON` to its label
 **Isolation.** Each job gets its own listener on a random localhost port, bound to the job's repo and closed when the job ends. Upload and download URLs are HMAC-signed per listener. Branch scoping comes from the `ac` claim of the job's `ACTIONS_RUNTIME_TOKEN`: the write scope is the job's ref, and the extra read scopes are, for example, a PR's base branch. Lookup order matches GitHub's: own ref first, then exact key, key prefix, and restore-key prefixes, newest first.
 
 **Pointing jobs at it.** The runner's worker sets `ACTIONS_RESULTS_URL` for every step, overwriting the environment. spareci keeps a second copy of the runner install in which the worker's UTF-16 string `ACTIONS_RESULTS_URL` is renamed to `ACTIONS_RESULTS_ORL` (same length). The worker then sets the renamed variable, and the value spareci puts in the runner's environment reaches the job. Other self-hosted cache servers use the same patch. If a runner release changes that string, the patch fails, spareci logs it and jobs use GitHub's cache. The unpatched install is used for `--cache=false`.
+
+## Estimate
+
+`spareci estimate` lists runs with `GET /repos/{repo}/actions/runs?created=FROM..TO`, then each run's jobs with `GET .../runs/{id}/jobs?filter=all`, so re-run attempts count too. GitHub returns at most 1,000 runs for a filtered listing, so a busier window is split in half until each part fits. The run-timing endpoint is no use here: it now reports 0 ms for every job.
+
+Each job that got a runner and finished is billed `ceil(completed_at - started_at)` minutes, at least 1. Jobs with no runner (skipped, or failed before starting) cost nothing. Where a job ran:
+
+- **Self-hosted**: a `self-hosted` label, or a runner not named `GitHub Actions N` outside runner group 0.
+- **Larger runner**: a label giving the size (`ubuntu-8-core`, `windows-arm-16core`). The API doesn't report a larger runner's machine size on the job, so other names are shown unpriced.
+- **Standard runner**: a GitHub image label (`ubuntu-24.04`, `macos-15`, `windows-11-arm`, `macos-15-xlarge`, ...). The API sometimes returns a null runner group for these.
+
+It checks `GET /rate_limit` before fetching jobs (one request per run) and stops if that would leave fewer than 100 calls. Requests go through the client's ETag cache and up to four run at once; a 5xx on a jobs request is retried twice.
 
 ## Testing
 
