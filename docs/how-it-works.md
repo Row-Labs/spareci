@@ -7,7 +7,7 @@
 | `cmd/spareci` | CLI: flags, signals, wiring |
 | `internal/gh` | The few GitHub REST calls needed: queued jobs, JIT runners, repo variables |
 | `internal/pool` | Poll loop: decides how many runners to start and drains on shutdown |
-| `internal/runner` | Installs `actions/runner`, clones it per job, runs it, patches the worker for the cache |
+| `internal/runner` | Installs `actions/runner`, clones it per job, runs it with the job's home and environment, patches the worker for the cache |
 | `internal/cache` | Local implementation of GitHub's cache service |
 
 ## Job lifecycle
@@ -19,6 +19,20 @@
 5. The clone is deleted. If the runner never got a job, its registration is deleted too.
 
 Routing: on start, spareci sets the repo variable `SPARECI_RUNS_ON` to its label, so `runs-on: ${{ vars.SPARECI_RUNS_ON || 'ubuntu-24.04' }}` resolves to this machine. On `^C`, it deletes the variable first, so new jobs go to GitHub, then waits for running jobs.
+
+## Job home and environment
+
+`runner.ResolveJobHome` turns `--job-home` into a directory, and `runner.JobEnv` builds the runner's environment from spareci's own:
+
+- `spareci` (default): `HOME` is `<cache root>/home/<owner>/<repo>`, created `0700` and kept between jobs. One per repo, so a job in one repo can't leave a `~/.gitconfig` or `~/.npmrc` that changes another repo's jobs.
+- `user`: the environment passes through unchanged, as before this existed.
+- An absolute path: used as `HOME`, with the same filtering as `spareci`.
+
+With a separate home, only an allowlist of variables reaches the runner (`passEnv` in `internal/runner/home.go`: locale, `TMPDIR`, proxy and CA settings, `DEVELOPER_DIR`, `DOCKER_HOST`, `XDG_RUNTIME_DIR`, `PATH`). `PATH` entries inside the user's home are dropped, since tools there (rustup proxies, nvm shims) would look for their state in the real home. `GIT_CONFIG_NOSYSTEM=1` keeps the system gitconfig's keychain credential helper away from jobs.
+
+No tool-specific variables are set. Go (`GOPATH`, `GOMODCACHE`, `GOCACHE`), npm, pip, cargo, rustup and the XDG defaults all derive from `HOME`, and the inherited overrides are dropped, so `setup-go`'s `go env GOMODCACHE` points into the job home. `TestJobEnvMovesGoState` checks this with the real Go toolchain.
+
+Not covered: `ssh` and Xcode read the home directory from the user database, not `HOME`, and anything the user can read stays readable. See the README's "What a job can see" and [isolation.md](isolation.md).
 
 ## Local cache
 

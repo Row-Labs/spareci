@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"flag"
 	"fmt"
@@ -28,7 +29,7 @@ const usage = `spareci: run your GitHub Actions jobs on your own machine.
 
 Usage:
   spareci up     [--repo owner/name] [--label spareci] [--max 1] [--dry-run]
-                 [--cache=true] [--cache-size 10GB]
+                 [--cache=true] [--cache-size 10GB] [--job-home spareci|user|PATH]
   spareci status [--repo owner/name]
   spareci down   [--repo owner/name]   clear routing and stale runners after a crash
   spareci cache  ls|clear [--repo owner/name]
@@ -104,6 +105,7 @@ func up(args []string) error {
 	version := fs.String("runner-version", "", "actions/runner version (default: latest)")
 	useCache := fs.Bool("cache", true, "serve actions/cache from this machine's disk instead of GitHub")
 	cacheSize := fs.String("cache-size", "10GB", "local cache size before least recently used entries are evicted")
+	jobHome := fs.String("job-home", runner.HomeSpareci, `HOME for jobs: "spareci" (a separate home per repo), "user" (your own home and environment), or a path`)
 	upstream := fs.String("cache-upstream", cache.DefaultUpstream, "GitHub results service, for calls the local cache passes through (artifacts)")
 	_ = fs.Parse(args)
 	if *verbose {
@@ -133,6 +135,9 @@ func up(args []string) error {
 	}()
 
 	host := &runner.Host{Root: runner.DefaultRoot(), Version: *version}
+	if host.JobHome, err = runner.ResolveJobHome(*jobHome, host.Root, c.repo); err != nil {
+		return err
+	}
 	if host.Version == "" {
 		if host.Version, err = client.LatestRunnerVersion(soft); err != nil {
 			return fmt.Errorf("find runner version: %w", err)
@@ -153,7 +158,7 @@ func up(args []string) error {
 	}
 
 	labels := append(runner.DefaultLabels(), c.label)
-	slog.Info("spareci up", "repo", c.repo, "labels", labels, "max", *maxN, "runner", host.Version, "dir", host.Root, "local_cache", cacheSrv != nil, "dry_run", *dry)
+	slog.Info("spareci up", "repo", c.repo, "labels", labels, "max", *maxN, "runner", host.Version, "dir", host.Root, "job_home", cmp.Or(host.JobHome, "user"), "local_cache", cacheSrv != nil, "dry_run", *dry)
 	p := pool.New(pool.Config{
 		Repo:        c.repo,
 		Labels:      labels,
