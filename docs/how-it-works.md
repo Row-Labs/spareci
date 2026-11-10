@@ -152,6 +152,8 @@ If GitHub can't be reached, the job is still recorded, with this machine's times
 
 Pricing happens when `stats` runs, not when the job is recorded, through `estimate.ForLabels` and `estimate.Minutes`, the same code `estimate` bills with; `TestPriceMatchesEstimate` checks that the two agree.
 
+Verified live on 2026-11-10: `spareci up` ran CI run 42906945251 (`build`, `cache-save`, `cache-restore`) and recorded all three with GitHub's times, job IDs and the `ubuntu-24.04` fallback read from `ci.yml` at the run's commit, priced as Linux 2-core: 3 min, $0.018.
+
 ## Testing
 
 - `go test -short ./...`: unit tests, including the cache protocol over HTTP, the lease and rescue logic against a fake GitHub, the rendered launchd and systemd files, and `init`'s rewrites (table tests over realistic workflows in `internal/workflows/testdata`).

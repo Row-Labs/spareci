@@ -178,7 +178,7 @@ func (r Report) Text(w io.Writer) {
 		return
 	}
 	fmt.Fprintf(w, "spareci saved you %s · %s jobs · %s min since %s\n\n",
-		estimate.Money(r.AllTime.Saved), estimate.FmtInt(r.AllTime.Jobs), estimate.FmtInt(r.AllTime.Minutes), r.Since.In(r.Now.Location()).Format("Jan 2, 2006"))
+		money(r.AllTime.Saved), estimate.FmtInt(r.AllTime.Jobs), estimate.FmtInt(r.AllTime.Minutes), r.Since.In(r.Now.Location()).Format("Jan 2, 2006"))
 
 	width := 20
 	for _, l := range append(append([]Line{}, r.ByRepo...), r.ByRunner...) {
@@ -188,7 +188,7 @@ func (r Report) Text(w io.Writer) {
 		fmt.Fprintln(w, strings.TrimRight(fmt.Sprintf("  %-*s %6s %9s %10s", width, cols[0], cols[1], cols[2], cols[3]), " "))
 	}
 	totals := func(name string, t Totals, free bool) {
-		saved := estimate.Money(t.Saved)
+		saved := money(t.Saved)
 		if free {
 			saved = "free (public)"
 		}
@@ -232,9 +232,9 @@ func Summary(rec Record, all Report) string {
 	case p.Free:
 		this = fmt.Sprintf("job recorded: %d min on %s, free for a public repo", p.Minutes, p.Runner.Name)
 	default:
-		this = fmt.Sprintf("saved %s: %d min on %s", estimate.Money(p.Saved), p.Minutes, p.Runner.Name)
+		this = fmt.Sprintf("saved %s: %d min on %s", money(p.Saved), p.Minutes, p.Runner.Name)
 	}
-	return fmt.Sprintf("%s; %s in all over %s", this, estimate.Money(all.AllTime.Saved), plural(all.AllTime.Jobs, "job"))
+	return fmt.Sprintf("%s; %s in all over %s", this, money(all.AllTime.Saved), plural(all.AllTime.Jobs, "job"))
 }
 
 func plural(n int, noun string) string {
@@ -242,4 +242,14 @@ func plural(n int, noun string) string {
 		return "1 " + noun
 	}
 	return estimate.FmtInt(n) + " " + noun + "s"
+}
+
+// money is estimate's dollar format, with a tenth of a cent under $1: a
+// 1-minute Linux job saves $0.006, and three of them should add up to
+// $0.018, not $0.01 each and $0.02 in all.
+func money(v float64) string {
+	if v > 0 && v < 1 {
+		return fmt.Sprintf("$%.3f", v)
+	}
+	return estimate.Money(v)
 }

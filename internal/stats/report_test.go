@@ -143,7 +143,7 @@ func TestSummary(t *testing.T) {
 	recs := fixtureRecords()
 	all := Build(recs, 0, now)
 	got := Summary(recs[0], all)
-	if got != "saved $0.43: 7 min on macOS standard; $1.77 in all over 6 jobs" {
+	if got != "saved $0.434: 7 min on macOS standard; $1.77 in all over 6 jobs" {
 		t.Errorf("Summary = %q", got)
 	}
 	if got := Summary(recs[7], all); !strings.HasPrefix(got, "job recorded, not priced (ci:matrix:") {

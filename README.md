@@ -140,12 +140,12 @@ spareci saved you $1.77 · 6 jobs · 28 min since Oct 20, 2026
 
   INSTEAD OF
   macOS 5-core M2 Pro       1        10      $1.02
-  macOS standard            2        12      $0.74
-  Linux 2-core              2         4      $0.01
+  macOS standard            2        12     $0.744
+  Linux 2-core              2         4     $0.006
   Self-hosted               1         2      $0.00
 ```
 
-The runner a job would have used is its fallback, the `'macos-15'` in `${{ vars.SPARECI_RUNS_ON || 'macos-15' }}`, read from the workflow file at the run's commit. Jobs are priced exactly as `spareci estimate` prices them: GitHub's timestamps, rounded up to the whole minute, at list price, free for standard runners in public repos. A job whose fallback spareci can't read (a `matrix.os` expression, a reusable workflow, a custom runner label) isn't priced or guessed; `stats` counts it separately and `--json` says why. Weeks start on Monday and months on the 1st, in local time. Each finished job also logs a line like `saved $0.43: 7 min on macOS standard; $1.77 in all over 6 jobs`.
+The runner a job would have used is its fallback, the `'macos-15'` in `${{ vars.SPARECI_RUNS_ON || 'macos-15' }}`, read from the workflow file at the run's commit. Jobs are priced exactly as `spareci estimate` prices them: GitHub's timestamps, rounded up to the whole minute, at list price, free for standard runners in public repos. A job whose fallback spareci can't read (a `matrix.os` expression, a reusable workflow, a custom runner label) isn't priced or guessed; `stats` counts it separately and `--json` says why. Weeks start on Monday and months on the 1st, in local time. Each finished job also logs a line like `saved $0.434: 7 min on macOS standard; $1.77 in all over 6 jobs`. Amounts under $1 are shown to a tenth of a cent, so small Linux savings still add up visibly.
 
 The record is a local file, `~/Library/Caches/spareci/stats/jobs.jsonl` (`~/.cache/spareci/stats/` on Linux), one line per job, shared by every repo on the machine. It stays on this machine.
 
