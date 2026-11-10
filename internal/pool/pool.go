@@ -41,6 +41,7 @@ type worker struct {
 	name     string
 	spawned  time.Time
 	started  time.Time // zero until the runner picks up a job
+	job      string    // name of the job it took
 	cancel   context.CancelFunc
 	runnerID int64
 }
@@ -105,13 +106,21 @@ func (p *Pool) tick(ctx, hardCtx context.Context) error {
 
 	p.mu.Lock()
 	active := len(p.workers)
-	// A runner counts as covering a queued job until it has started one, and
-	// for a short grace period after, because the API keeps reporting the job
-	// as queued for a few seconds once a runner has it.
+	// A runner covers one queued job until it starts one. After that, the API
+	// can keep reporting the job it took as queued for a few seconds, so for a
+	// short grace period a queued job with that name stays covered too.
+	queuedNames := map[string]int{}
+	for _, j := range mine {
+		queuedNames[j.Name]++
+	}
 	waiting := 0
 	now := time.Now()
 	for _, w := range p.workers {
-		if w.started.IsZero() || now.Sub(w.started) < 20*time.Second {
+		switch {
+		case w.started.IsZero():
+			waiting++
+		case now.Sub(w.started) < 20*time.Second && queuedNames[w.job] > 0:
+			queuedNames[w.job]--
 			waiting++
 		}
 		// Reap a runner that never got work (e.g. the job was cancelled).
@@ -182,9 +191,9 @@ func (p *Pool) spawn(ctx, hardCtx context.Context) error {
 		if jl != nil {
 			defer jl.Close()
 		}
-		res, err := p.host.Run(runCtx, name, jit.Config, env, func() {
+		res, err := p.host.Run(runCtx, name, jit.Config, env, func(job string) {
 			p.mu.Lock()
-			w.started = time.Now()
+			w.started, w.job = time.Now(), job
 			p.mu.Unlock()
 		})
 

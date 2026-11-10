@@ -116,7 +116,7 @@ type Result struct {
 // runs it for a single job with the given JIT config, and deletes the clone.
 // Cancelling ctx stops the runner gracefully, then forcibly. onStart is called
 // when the runner picks up its job. extraEnv (KEY=VALUE) reaches every step.
-func (h *Host) Run(ctx context.Context, name, jitConfig string, extraEnv []string, onStart func()) (Result, error) {
+func (h *Host) Run(ctx context.Context, name, jitConfig string, extraEnv []string, onStart func(job string)) (Result, error) {
 	res := Result{Log: filepath.Join(h.LogsDir(), name+".log")}
 	dir := filepath.Join(h.jobsDir(), name)
 	if err := os.MkdirAll(h.jobsDir(), 0o755); err != nil {
@@ -169,7 +169,7 @@ func (h *Host) Run(ctx context.Context, name, jitConfig string, extraEnv []strin
 				res.Job = rest
 				slog.Info("job started", "runner", name, "job", rest)
 				if onStart != nil {
-					onStart()
+					onStart(rest)
 				}
 			}
 			if _, rest, ok := strings.Cut(line, "completed with result: "); ok {

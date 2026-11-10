@@ -26,7 +26,7 @@ The spike ran under the working name `homerun`; renamed to spareci afterwards.
 3. Jobs run on the host as the user. That's acceptable for your own private repos and unacceptable for anything else. Next: Tart VMs on macOS, containers on Linux.
 4. If the process is killed without `^C`, the variable stays set and jobs queue for an offline machine until `spareci down`. Fix: a launchd/systemd service plus a heartbeat (e.g. the variable carries an expiry that a tiny hosted job checks), or the scale-set long-poll API.
 
-## Next steps (in order)
+## Next steps (in order; 1 shipped 2026-11-10, see docs/how-it-works.md)
 
 1. Local actions/cache server (finding 1).
 2. `spareci install`: launchd/systemd service, survives reboot, crash-safe routing.
