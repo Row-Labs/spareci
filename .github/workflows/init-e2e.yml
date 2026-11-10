@@ -2,7 +2,7 @@ name: init e2e (scratch)
 on: workflow_dispatch
 jobs:
   mac-build:
-    runs-on: macos-15 # the job init should convert
+    runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }} # the job init should convert
     steps:
       - run: echo hi
   linux-lint:
