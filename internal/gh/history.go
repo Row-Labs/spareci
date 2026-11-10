@@ -2,9 +2,11 @@ package gh
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -17,11 +19,18 @@ func NewWith(token, base string, hc *http.Client) *Client {
 	return &Client{token: token, base: base, http: hc, etags: map[string]cached{}}
 }
 
-// Repo is the part of a repository spareci estimate needs.
+// Repo is the part of a repository spareci estimate and watchdog setup need.
 type Repo struct {
+	ID       int64  `json:"id"`
 	FullName string `json:"full_name"`
+	HTMLURL  string `json:"html_url"`
 	Private  bool   `json:"private"`
 	Archived bool   `json:"archived"`
+	Owner    struct {
+		ID    int64  `json:"id"`
+		Login string `json:"login"`
+		Type  string `json:"type"` // "User" or "Organization"
+	} `json:"owner"`
 }
 
 func (c *Client) Repo(ctx context.Context, repo string) (Repo, error) {
@@ -96,6 +105,37 @@ type RunJob struct {
 	RunnerName      string     `json:"runner_name"`
 	RunnerGroupID   *int64     `json:"runner_group_id"`
 	RunnerGroupName string     `json:"runner_group_name"`
+	WorkflowName    string     `json:"workflow_name"`
+	HeadSHA         string     `json:"head_sha"`
+	HTMLURL         string     `json:"html_url"`
+}
+
+// GetJob is one job, by ID.
+func (c *Client) GetJob(ctx context.Context, repo string, jobID int64) (RunJob, error) {
+	var j RunJob
+	err := c.do(ctx, "GET", fmt.Sprintf("/repos/%s/actions/jobs/%d", repo, jobID), nil, &j)
+	return j, err
+}
+
+// FileAt is a file's contents at ref (a commit SHA, branch or tag).
+func (c *Client) FileAt(ctx context.Context, repo, path, ref string) ([]byte, error) {
+	var resp struct {
+		Type     string `json:"type"`
+		Encoding string `json:"encoding"`
+		Content  string `json:"content"`
+	}
+	segs := strings.Split(path, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	p := fmt.Sprintf("/repos/%s/contents/%s?ref=%s", repo, strings.Join(segs, "/"), url.QueryEscape(ref))
+	if err := c.do(ctx, "GET", p, nil, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Type != "file" || resp.Encoding != "base64" {
+		return nil, fmt.Errorf("%s at %s: not a file (%s, %s encoding)", path, ref, resp.Type, resp.Encoding)
+	}
+	return base64.StdEncoding.DecodeString(strings.ReplaceAll(resp.Content, "\n", ""))
 }
 
 // AllRunJobs lists every job of every attempt of a run; RunJobs only sees

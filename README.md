@@ -112,9 +112,43 @@ spareci up --git-mirror=false  # no local git mirror; checkouts fetch everything
 spareci cache ls           # what's in the local cache
 spareci down               # after a crash: route jobs back to GitHub, remove stale runners
 spareci estimate           # what your Actions minutes cost, and what this machine could save
+spareci stats              # what the jobs this machine ran would have cost on GitHub
 ```
 
 Press `^C` once and spareci routes new jobs back to GitHub, lets running jobs finish, and then sends any job still queued for this machine to GitHub-hosted runners. Press it twice and running jobs are aborted.
+
+### What did it save?
+
+Every job `spareci up` runs is recorded, along with the GitHub-hosted runner it would have used otherwise:
+
+```sh
+spareci stats
+spareci stats --json
+```
+
+```
+spareci saved you $1.77 · 6 jobs · 28 min since Oct 20, 2026
+
+                         JOBS   MINUTES      SAVED
+  This week                 4        16      $1.03
+  This month                5        21      $1.34
+  All time                  6        28      $1.77
+
+  BY REPO
+  acme/app                  4        23      $1.77
+  acme/site                 1         3 free (public)
+  acme/api                  1         2      $0.00
+
+  INSTEAD OF
+  macOS 5-core M2 Pro       1        10      $1.02
+  macOS standard            2        12     $0.744
+  Linux 2-core              2         4     $0.006
+  Self-hosted               1         2      $0.00
+```
+
+The runner a job would have used is its fallback, the `'macos-15'` in `${{ vars.SPARECI_RUNS_ON || 'macos-15' }}`, read from the workflow file at the run's commit. Jobs are priced exactly as `spareci estimate` prices them: GitHub's timestamps, rounded up to the whole minute, at list price, free for standard runners in public repos. A job whose fallback spareci can't read (a `matrix.os` expression, a reusable workflow, a custom runner label) isn't priced or guessed; `stats` counts it separately and `--json` says why. Weeks start on Monday and months on the 1st, in local time. Each finished job also logs a line like `saved $0.434: 7 min on macOS standard; $1.77 in all over 6 jobs`. Amounts under $1 are shown to a tenth of a cent, so small Linux savings still add up visibly.
+
+The record is a local file, `~/Library/Caches/spareci/stats/jobs.jsonl` (`~/.cache/spareci/stats/` on Linux), one line per job, shared by every repo on the machine. It stays on this machine.
 
 ### Laptop mode
 
@@ -164,13 +198,20 @@ A job never waits on this machine for long:
 - **Dead machine** (crash, `kill -9`, power cut, a laptop that went to sleep). Nothing on the machine can clean up, so a small workflow on GitHub does it. Add it once:
 
   ```sh
-  spareci watchdog > .github/workflows/spareci-watchdog.yml   # commit it to your default branch
-  gh secret set SPARECI_TOKEN   # paste a fine-grained token for this repo with "Variables: read and write"
+  cd your-repo
+  spareci watchdog --setup   # then commit .github/workflows/spareci-watchdog.yml to your default branch
   ```
 
-  While spareci is up it refreshes a heartbeat variable every minute. When the heartbeat is more than 5 minutes old, the watchdog clears the routing variable and re-runs jobs that were queued for this machine on GitHub-hosted runners. Expect that within about 15 to 20 minutes of the machine going away, longer if GitHub is slow to start scheduled workflows. While spareci is healthy, the watchdog's runs are skipped and use no Actions minutes.
+  `--setup` opens GitHub in your browser twice: once to create a private GitHub App with a single permission (Variables: read and write), once to install it on this repo. It stores the app's client ID and key as repo secrets. Each watchdog run mints a token from them that lasts an hour, so there's nothing to renew. For a repo in an organization, the app belongs to the organization, which needs an org owner (or app manager) to create it.
 
-  The token is needed because a workflow's own `GITHUB_TOKEN` can't change repo variables. When the machine comes back, spareci turns routing on again by itself.
+  While spareci is up it refreshes a heartbeat variable every minute. When the heartbeat is more than 5 minutes old, the watchdog clears the routing variable and re-runs jobs that were queued for this machine on GitHub-hosted runners. Expect that within about 15 to 20 minutes of the machine going away, longer if GitHub is slow to start scheduled workflows. While spareci is healthy, the watchdog's runs are skipped and use no Actions minutes. When the machine comes back, spareci turns routing on again by itself.
+
+  The app is needed because a workflow's own `GITHUB_TOKEN` can't change repo variables. If you'd rather not create an app, use a fine-grained personal access token instead (it expires, so set a reminder):
+
+  ```sh
+  spareci watchdog > .github/workflows/spareci-watchdog.yml
+  gh secret set SPARECI_TOKEN   # paste a fine-grained token for this repo with "Variables: read and write"
+  ```
 
 Sending a job back means cancelling its workflow run and re-running it, because GitHub reads `vars` once per run attempt. Usually only the cancelled jobs are re-run. If an earlier job in the run already finished on this machine, the whole run is re-run on GitHub, since that job's caches are on this machine where a GitHub-hosted job can't restore them. See [docs/how-it-works.md](docs/how-it-works.md#routing).
 

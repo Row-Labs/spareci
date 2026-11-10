@@ -179,20 +179,47 @@ func BillableMinutes(j gh.RunJob) int {
 	if j.Status != "completed" || j.CompletedAt == nil || j.StartedAt.IsZero() || j.RunnerName == "" {
 		return 0
 	}
-	d := j.CompletedAt.Sub(j.StartedAt)
+	return Minutes(j.StartedAt, *j.CompletedAt)
+}
+
+// Minutes is a job that ran from start to end, rounded up to the whole
+// minute and at least 1, as GitHub bills it.
+func Minutes(start, end time.Time) int {
+	d := end.Sub(start)
 	if d <= 0 {
 		return 1
 	}
 	return int(math.Ceil(d.Minutes()))
 }
 
-type kind int
+// Kind is where a job runs, for pricing.
+type Kind int
 
 const (
-	hosted kind = iota
-	selfHosted
-	unpriced
+	Hosted     Kind = iota // a GitHub-hosted runner with a known price
+	SelfHosted             // free
+	Unpriced               // a label that isn't a GitHub image or a sized larger runner
 )
+
+// ForLabels prices a runs-on by its labels alone, the way classify does once
+// it knows the runner was GitHub's: self-hosted, a sized larger runner, a
+// standard image, or unknown.
+func ForLabels(labels []string) (Kind, Runner) {
+	for _, l := range labels {
+		if strings.EqualFold(l, "self-hosted") {
+			return SelfHosted, Runner{Name: "Self-hosted"}
+		}
+	}
+	if sku, ok := largerSKU(labels); ok {
+		return Hosted, prices[sku]
+	}
+	for _, l := range labels {
+		if sku, ok := standardSKU(l); ok {
+			return Hosted, prices[sku]
+		}
+	}
+	return Unpriced, Runner{}
+}
 
 // classify decides where a job ran. A self-hosted runner always carries the
 // self-hosted label, but a job can ask for it by a custom label alone, so the
@@ -200,29 +227,16 @@ const (
 // standard ones sit in runner group 0. The API sometimes reports a null group
 // for standard runners, so a GitHub image label (ubuntu-24.04, macos-15) on a
 // hosted runner is enough.
-func classify(j gh.RunJob) (kind, string) {
-	for _, l := range j.Labels {
-		if strings.EqualFold(l, "self-hosted") {
-			return selfHosted, ""
-		}
-	}
+func classify(j gh.RunJob) (Kind, string) {
 	standardGroup := j.RunnerGroupID != nil && *j.RunnerGroupID == 0
 	if !strings.HasPrefix(j.RunnerName, "GitHub Actions") && !standardGroup {
-		return selfHosted, ""
+		return SelfHosted, ""
 	}
-	// Sized names first: "ubuntu-8-core" is a larger runner, not ubuntu-*.
-	if sku, ok := largerSKU(j.Labels); ok {
-		return hosted, sku
+	k, r := ForLabels(j.Labels)
+	if k == Unpriced && standardGroup {
+		return Hosted, "actions_linux" // a standard image we don't know yet
 	}
-	for _, l := range j.Labels {
-		if sku, ok := standardSKU(l); ok {
-			return hosted, sku
-		}
-	}
-	if standardGroup {
-		return hosted, "actions_linux" // a standard image we don't know yet
-	}
-	return unpriced, ""
+	return k, r.SKU
 }
 
 // Build prices jobs and works out what host could take.
@@ -242,12 +256,12 @@ func Build(jobs []Job, host Host, repos []string, runs int, from, to time.Time) 
 		}
 		k, sku := classify(j.RunJob)
 		switch k {
-		case selfHosted:
+		case SelfHosted:
 			r.SelfHosted.Jobs++
 			r.SelfHosted.Minutes += mins
 			r.SelfHosted.Cost += float64(mins) * SelfHostedPerMinute
 			continue
-		case unpriced:
+		case Unpriced:
 			r.Unpriced.Jobs++
 			r.Unpriced.Minutes += mins
 			continue

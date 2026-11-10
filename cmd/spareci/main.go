@@ -41,11 +41,13 @@ Usage:
   spareci install   [--repo owner/name] [up flags]   run "up" in the background, at login
   spareci uninstall [--repo owner/name]
   spareci logs      [--repo owner/name] [-f] [-n 50]
-  spareci watchdog  print the workflow that reroutes jobs if this machine dies
+  spareci watchdog  [--setup [--force]]   print the workflow that reroutes jobs if this
+                    machine dies; --setup also creates the app it uses to write variables
   spareci status    [--repo owner/name]
   spareci down      [--repo owner/name]   route jobs back to GitHub after a crash
   spareci cache     ls|clear [--repo owner/name]
   spareci estimate  [--repo owner/name]... [--org name] [--days 30] [--json]
+  spareci stats     [--json]   what the jobs this machine ran would have cost on GitHub
   spareci version
 
 In your workflow (spareci init does this), route jobs here when spareci is up,
@@ -81,6 +83,8 @@ func main() {
 		err = cacheCmd(os.Args[2:])
 	case "estimate":
 		err = estimateCmd(os.Args[2:])
+	case "stats":
+		err = statsCmd(os.Args[2:])
 	case "version", "--version":
 		fmt.Println("spareci", version)
 	case "-h", "--help", "help":
@@ -247,6 +251,7 @@ func up(args []string) error {
 		DryRun:   *dry,
 		Cache:    cacheSrv,
 		Gate:     poolGate(g),
+		Stats:    recorder(*dry, client, c, host.Root),
 	}, client, host)
 	if g != nil {
 		slog.Info("laptop mode: taking jobs only when conditions are met", "when", g.Config().String())
@@ -435,8 +440,8 @@ func install(args []string) error {
 		return err
 	}
 	fmt.Printf("installed %s\n  runs: %s %s\n  logs: %s (spareci logs -f)\n", path, exe, strings.Join(spec.Args, " "), spec.Log)
-	fmt.Println("It starts at login and restarts if it crashes. To make a dead machine safe, add the watchdog workflow:")
-	fmt.Println("  spareci watchdog > .github/workflows/spareci-watchdog.yml")
+	fmt.Println("It starts at login and restarts if it crashes. To make a dead machine safe, set up the watchdog:")
+	fmt.Println("  spareci watchdog --setup")
 	if runtime.GOOS == "linux" {
 		fmt.Println("To run while you're logged out, enable lingering: loginctl enable-linger $USER")
 	}
@@ -494,17 +499,6 @@ func logs(args []string) error {
 	cmd := exec.Command("tail", append(targs, path)...)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	return cmd.Run()
-}
-
-func watchdog(args []string) error {
-	fs := flag.NewFlagSet("watchdog", flag.ExitOnError)
-	c := commonFlags(fs)
-	_ = fs.Parse(args)
-	if c.vname == "" || c.hname == "" {
-		return fmt.Errorf("the watchdog needs both --fallback-var and --heartbeat-var")
-	}
-	fmt.Print(route.Watchdog(c.vname, c.hname))
-	return nil
 }
 
 func logPath(repo string) string {

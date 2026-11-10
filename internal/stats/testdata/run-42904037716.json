@@ -1,0 +1,12 @@
+{
+  "id": 42904037716,
+  "name": "CI",
+  "path": ".github/workflows/ci.yml",
+  "head_sha": "0a593c585c1d327ae8e5bc2b0c6466d3f7467b6e",
+  "status": "completed",
+  "run_attempt": 1,
+  "run_started_at": "2026-11-10T21:20:14Z",
+  "html_url": "https://github.com/Row-Labs/spareci/actions/runs/42904037716",
+  "workflow_id": 413567447,
+  "event": "workflow_dispatch"
+}

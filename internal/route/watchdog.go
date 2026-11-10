@@ -6,10 +6,18 @@ import (
 	"text/template"
 )
 
-// WatchdogSecret holds a token that can delete repo variables. The workflow's
+// WatchdogSecret holds a token that can delete repo variables: the manual
+// fallback to the app that `spareci watchdog --setup` creates. The workflow's
 // own GITHUB_TOKEN can cancel and re-run, but GitHub doesn't let it write
 // variables.
 const WatchdogSecret = "SPARECI_TOKEN"
+
+// Secrets holding the watchdog app's client ID and private key (ghapp writes
+// them; the names live here so the workflow doesn't import ghapp).
+const (
+	AppClientIDSecret = "SPARECI_APP_CLIENT_ID"
+	AppKeySecret      = "SPARECI_APP_KEY"
+)
 
 // Watchdog renders the workflow that routes jobs back to GitHub-hosted runners
 // when the daemon dies without cleaning up (crash, kill -9, power loss, a
@@ -26,6 +34,8 @@ func Watchdog(routingVar, heartbeatVar string) string {
 		"Var":       routingVar,
 		"Heartbeat": heartbeatVar,
 		"Secret":    WatchdogSecret,
+		"AppID":     AppClientIDSecret,
+		"AppKey":    AppKeySecret,
 		"Stale":     int(StaleAfter.Seconds()),
 		"Behind":    int(LeaseBehind.Minutes()),
 	})
@@ -48,8 +58,12 @@ var watchdogTmpl = template.Must(template.New("watchdog").Delims("<%", "%>").Fun
 # real (about one minute) when the heartbeat is older than <%.Stale%>s, or when
 # GitHub starts a firing more than <%.Behind%> minutes late.
 #
-# Setup: a fine-grained token for this repo with "Variables: read and write",
-# saved as the <%.Secret%> secret: gh secret set <%.Secret%>
+# Setup: run spareci watchdog --setup. It creates a private GitHub App with
+# one permission (Variables: read and write), installs it on this repo and
+# stores <%.AppID%> and <%.AppKey%>. Each run mints an hour-long
+# token from them, so nothing expires.
+# Fallback: a fine-grained token for this repo with "Variables: read and
+# write", saved as the <%.Secret%> secret: gh secret set <%.Secret%>
 name: spareci watchdog
 
 on:
@@ -70,25 +84,44 @@ jobs:
     if: vars.<%.Var%> && !contains(vars.<%.Heartbeat%>, format('|{0}|', github.event.schedule))
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      HAS_APP: ${{ secrets.<%.AppID%> != '' }}
     steps:
-      - name: Route jobs back to GitHub if spareci is gone
+      - name: Check the heartbeat
+        id: beat
         env:
-          GH_TOKEN: ${{ github.token }}
-          VAR_TOKEN: ${{ secrets.<%.Secret%> }}
-          REPO: ${{ github.repository }}
-          LABEL: ${{ vars.<%.Var%> }}
           HEARTBEAT: ${{ vars.<%.Heartbeat%> }}
         run: |
-          set -euo pipefail
           now=$(date +%s)
           beat=${HEARTBEAT%%|*}
           if [[ "$beat" =~ ^[0-9]+$ ]] && (( now - beat < <%.Stale%> )); then
             echo "spareci is up: last heartbeat $(( now - beat ))s ago"
-            exit 0
+          else
+            echo "No spareci heartbeat for <%.Stale%>s or more: routing jobs to GitHub-hosted runners"
+            echo stale=true >> "$GITHUB_OUTPUT"
           fi
-          echo "No spareci heartbeat for <%.Stale%>s or more: routing jobs to GitHub-hosted runners"
+
+      - name: Mint a token that can write variables
+        id: app
+        # If this fails (app uninstalled, key revoked), fall back to <%.Secret%>.
+        continue-on-error: true
+        if: steps.beat.outputs.stale == 'true' && env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.<%.AppID%> }}
+          private-key: ${{ secrets.<%.AppKey%> }}
+
+      - name: Route jobs back to GitHub
+        if: steps.beat.outputs.stale == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VAR_TOKEN: ${{ steps.app.outputs.token || secrets.<%.Secret%> }}
+          REPO: ${{ github.repository }}
+          LABEL: ${{ vars.<%.Var%> }}
+        run: |
+          set -euo pipefail
           if [ -z "$VAR_TOKEN" ]; then
-            echo "::error::Add a token that can write repo variables as the <%.Secret%> secret (see this file's header)"
+            echo "::error::No token can write repo variables. Run spareci watchdog --setup, or add a token as the <%.Secret%> secret (see this file's header)"
             exit 1
           fi
           GH_TOKEN=$VAR_TOKEN gh api -X DELETE "repos/$REPO/actions/variables/<%.Var%>"
