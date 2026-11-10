@@ -1,0 +1,17 @@
+{"total_count": 5, "jobs": [
+  {"id": 8, "run_id": 102, "run_attempt": 1, "name": "ios", "status": "completed", "conclusion": "success",
+   "started_at": "2026-11-02T10:00:00Z", "completed_at": "2026-11-02T10:10:00Z",
+   "labels": ["macos-15-xlarge"], "runner_name": "GitHub Actions 5", "runner_group_id": 0, "runner_group_name": "GitHub Actions"},
+  {"id": 9, "run_id": 102, "run_attempt": 1, "name": "windows", "status": "completed", "conclusion": "success",
+   "started_at": "2026-11-02T10:00:00Z", "completed_at": "2026-11-02T10:02:01Z",
+   "labels": ["windows-latest"], "runner_name": "GitHub Actions 6", "runner_group_id": 0, "runner_group_name": "GitHub Actions"},
+  {"id": 10, "run_id": 102, "run_attempt": 1, "name": "big build", "status": "completed", "conclusion": "success",
+   "started_at": "2026-11-02T10:00:00Z", "completed_at": "2026-11-02T10:05:00Z",
+   "labels": ["ubuntu-8-core"], "runner_name": "GitHub Actions 7", "runner_group_id": 5, "runner_group_name": "Larger runners"},
+  {"id": 11, "run_id": 102, "run_attempt": 1, "name": "mystery", "status": "completed", "conclusion": "success",
+   "started_at": "2026-11-02T10:00:00Z", "completed_at": "2026-11-02T10:04:30Z",
+   "labels": ["big-runner"], "runner_name": "GitHub Actions 8", "runner_group_id": 5, "runner_group_name": "Larger runners"},
+  {"id": 12, "run_id": 102, "run_attempt": 1, "name": "arm", "status": "completed", "conclusion": "success",
+   "started_at": "2026-11-02T10:00:00Z", "completed_at": "2026-11-02T10:01:00Z",
+   "labels": ["ubuntu-24.04-arm"], "runner_name": "GitHub Actions 9", "runner_group_id": 0, "runner_group_name": "GitHub Actions"}
+]}

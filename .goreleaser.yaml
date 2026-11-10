@@ -1,0 +1,71 @@
+# Release packaging. See docs/releasing.md.
+# Validate with: go run github.com/goreleaser/goreleaser/v2@v2.19.0 check
+version: 2
+
+project_name: spareci
+
+before:
+  hooks:
+    - go mod tidy -diff
+
+builds:
+  - id: spareci
+    main: ./cmd/spareci
+    binary: spareci
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [arm64, amd64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - formats: [tar.gz]
+    # spareci_darwin_arm64.tar.gz: no version in the name, so
+    # releases/latest/download/spareci_<os>_<arch>.tar.gz always works.
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge "
+
+release:
+  github:
+    owner: Row-Labs
+    name: spareci
+
+# `brew install row-labs/tap/spareci`. Pushes Casks/spareci.rb to
+# Row-Labs/homebrew-tap using the HOMEBREW_TAP_TOKEN secret.
+homebrew_casks:
+  - name: spareci
+    binaries: [spareci]
+    homepage: https://github.com/Row-Labs/spareci
+    description: Run your GitHub Actions jobs on a machine you already own
+    license: MIT
+    repository:
+      owner: Row-Labs
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    commit_author:
+      name: spareci-release
+      email: noreply@github.com
+    commit_msg_template: "spareci {{ .Tag }}"
+    # The binary isn't notarized; without this, macOS Gatekeeper blocks it
+    # on first run.
+    hooks:
+      post:
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/spareci"]
+          end

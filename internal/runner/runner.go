@@ -22,6 +22,9 @@ import (
 type Host struct {
 	Root    string // cache root: runner installs, job dirs, logs, shared tool cache
 	Version string
+	// JobHome is the HOME jobs run with (see ResolveJobHome and JobEnv).
+	// Empty: the user's own home and environment.
+	JobHome string
 
 	source string // install to clone per job; set by PrepareCacheVariant
 }
@@ -128,6 +131,11 @@ func (h *Host) Run(ctx context.Context, name, jitConfig string, extraEnv []strin
 	if err := os.MkdirAll(h.ToolCache(), 0o755); err != nil {
 		return res, err
 	}
+	if h.JobHome != "" {
+		if err := prepareHome(h.JobHome); err != nil {
+			return res, err
+		}
+	}
 	defer os.RemoveAll(dir)
 	src := h.source
 	if src == "" {
@@ -136,6 +144,8 @@ func (h *Host) Run(ctx context.Context, name, jitConfig string, extraEnv []strin
 	if err := clone(src, dir); err != nil {
 		return res, fmt.Errorf("clone runner: %w", err)
 	}
+	userHome, _ := os.UserHomeDir()
+	base := JobEnv(os.Environ(), userHome, h.JobHome)
 	env := append([]string{"AGENT_TOOLSDIRECTORY=" + h.ToolCache(), "RUNNER_TOOL_CACHE=" + h.ToolCache()}, extraEnv...)
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(strings.Join(env, "\n")+"\n"), 0o644); err != nil {
 		return res, err
@@ -149,7 +159,7 @@ func (h *Host) Run(ctx context.Context, name, jitConfig string, extraEnv []strin
 
 	cmd := exec.Command(filepath.Join(dir, "run.sh"), "--jitconfig", jitConfig)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = append(base, env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	pr, pw := io.Pipe()
 	cmd.Stdout, cmd.Stderr = pw, pw
