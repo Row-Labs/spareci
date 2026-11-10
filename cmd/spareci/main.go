@@ -115,19 +115,42 @@ func (c *common) resolve() error {
 	return nil
 }
 
+type upOpts struct {
+	*common
+	maxN      *int
+	maxWait   *time.Duration
+	interval  *time.Duration
+	dry       *bool
+	verbose   *bool
+	version   *string
+	useCache  *bool
+	cacheSize *string
+	upstream  *string
+}
+
+// upFlags defines up's flags; install checks its pass-through flags with it.
+func upFlags(fs *flag.FlagSet) *upOpts {
+	return &upOpts{
+		common:    commonFlags(fs),
+		maxN:      fs.Int("max", 1, "concurrent jobs"),
+		maxWait:   fs.Duration("max-wait", 10*time.Minute, "send a job queued here longer than this to GitHub-hosted runners (0 to never)"),
+		interval:  fs.Duration("interval", 5*time.Second, "poll interval"),
+		dry:       fs.Bool("dry-run", false, "log the jobs we would take; register nothing"),
+		verbose:   fs.Bool("v", false, "debug logging"),
+		version:   fs.String("runner-version", "", "actions/runner version (default: latest)"),
+		useCache:  fs.Bool("cache", true, "serve actions/cache from this machine's disk instead of GitHub"),
+		cacheSize: fs.String("cache-size", "10GB", "local cache size before least recently used entries are evicted"),
+		upstream:  fs.String("cache-upstream", cache.DefaultUpstream, "GitHub results service, for calls the local cache passes through (artifacts)"),
+	}
+}
+
 func up(args []string) error {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
-	c := commonFlags(fs)
-	maxN := fs.Int("max", 1, "concurrent jobs")
-	maxWait := fs.Duration("max-wait", 10*time.Minute, "send a job queued here longer than this to GitHub-hosted runners (0 to never)")
-	interval := fs.Duration("interval", 5*time.Second, "poll interval")
-	dry := fs.Bool("dry-run", false, "log the jobs we would take; register nothing")
-	verbose := fs.Bool("v", false, "debug logging")
-	version := fs.String("runner-version", "", "actions/runner version (default: latest)")
-	useCache := fs.Bool("cache", true, "serve actions/cache from this machine's disk instead of GitHub")
-	cacheSize := fs.String("cache-size", "10GB", "local cache size before least recently used entries are evicted")
-	upstream := fs.String("cache-upstream", cache.DefaultUpstream, "GitHub results service, for calls the local cache passes through (artifacts)")
+	o := upFlags(fs)
 	_ = fs.Parse(args)
+	c := o.common
+	maxN, maxWait, interval, dry, verbose, version := o.maxN, o.maxWait, o.interval, o.dry, o.verbose, o.version
+	useCache, cacheSize, upstream := o.useCache, o.cacheSize, o.upstream
 	if *verbose {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
@@ -336,7 +359,7 @@ func install(args []string) error {
 	}
 	// Check the flags now rather than in a restart loop.
 	check := flag.NewFlagSet("up", flag.ContinueOnError)
-	commonFlags(check)
+	upFlags(check)
 	if err := check.Parse(rest); err != nil {
 		return err
 	}

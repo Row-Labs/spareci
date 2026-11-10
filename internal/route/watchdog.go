@@ -98,13 +98,23 @@ jobs:
           # machine stay queued. Cancel and re-run them: the re-run reads the
           # cleared variable and goes to GitHub-hosted runners.
           label=$(printf '%s' "$LABEL" | tr '[:upper:]' '[:lower:]')
+          here='.labels | map(ascii_downcase) | index($l)'
+
+          cancel() {
+            gh api -X POST "repos/$REPO/actions/runs/$1/cancel" >/dev/null || true
+            for i in $(seq 1 40); do
+              [ "$(gh api "repos/$REPO/actions/runs/$1" --jq .status)" = completed ] && return
+              if [ "$i" = 20 ]; then gh api -X POST "repos/$REPO/actions/runs/$1/force-cancel" >/dev/null || true; fi
+              sleep 3
+            done
+          }
+
           runs=$(for s in queued in_progress; do
             gh api "repos/$REPO/actions/runs?status=$s&per_page=100" --jq '.workflow_runs[].id'
           done | sort -u)
           for run in $runs; do
             [ "$run" = "$GITHUB_RUN_ID" ] && continue
             jobs=$(gh api "repos/$REPO/actions/runs/$run/jobs?filter=latest&per_page=100")
-            here='.labels | map(ascii_downcase) | index($l)'
             stuck=$(jq --arg l "$label" "[.jobs[] | select(.status == \"queued\" and ($here))] | length" <<<"$jobs")
             [ "$stuck" -gt 0 ] || continue
             # A job that already finished on the machine saved its caches there,
@@ -114,13 +124,23 @@ jobs:
             rerun=rerun-failed-jobs
             [ "$done_here" -gt 0 ] && rerun=rerun
             echo "run $run: $stuck job(s) queued for spareci; cancelling, then $rerun"
-            gh api -X POST "repos/$REPO/actions/runs/$run/cancel" >/dev/null || true
-            for i in $(seq 1 40); do
-              [ "$(gh api "repos/$REPO/actions/runs/$run" --jq .status)" = completed ] && break
-              [ "$i" = 20 ] && gh api -X POST "repos/$REPO/actions/runs/$run/force-cancel" >/dev/null || true
-              sleep 3
-            done
-            gh api -X POST "repos/$REPO/actions/runs/$run/$rerun" >/dev/null ||
+            cancel "$run"
+            if ! gh api -X POST "repos/$REPO/actions/runs/$run/$rerun" >/dev/null; then
               echo "::warning::could not re-run run $run"
+              continue
+            fi
+            [ "$rerun" = rerun ] && continue
+            # GitHub has been seen to leave a cancelled job out of a failed-jobs
+            # re-run. If it did, cancel the new attempt and re-run everything.
+            sleep 10
+            attempt=$(gh api "repos/$REPO/actions/runs/$run" --jq .run_attempt)
+            left=$(gh api "repos/$REPO/actions/runs/$run/jobs?filter=latest&per_page=100" |
+              jq --argjson a "$attempt" '[.jobs[] | select(.run_attempt < $a and .conclusion == "cancelled")] | length')
+            if [ "$left" -gt 0 ]; then
+              echo "run $run: re-run left $left cancelled job(s) out; re-running the whole run"
+              cancel "$run"
+              gh api -X POST "repos/$REPO/actions/runs/$run/rerun" >/dev/null ||
+                echo "::warning::could not re-run run $run"
+            fi
           done
 `))

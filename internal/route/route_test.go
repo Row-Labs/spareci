@@ -20,7 +20,16 @@ type fake struct {
 	jobs    []gh.Job
 	calls   []string
 	stuck   bool   // ignore normal cancel, like a run held by a dead runner
+	skip    string // a job a failed-jobs re-run leaves out, as GitHub once did
 	routing string // value of SPARECI_RUNS_ON when the re-run was created
+}
+
+func (f *fake) cancelJobs() {
+	for i := range f.jobs {
+		if f.jobs[i].Status != "completed" {
+			f.jobs[i].Status, f.jobs[i].Conclusion = "completed", "cancelled"
+		}
+	}
 }
 
 func newFake() *fake {
@@ -63,6 +72,7 @@ func (f *fake) CancelRun(context.Context, string, int64) error {
 	f.log("cancel")
 	if !f.stuck {
 		f.run.Status = "completed"
+		f.cancelJobs()
 	}
 	return nil
 }
@@ -72,6 +82,7 @@ func (f *fake) ForceCancelRun(context.Context, string, int64) error {
 	defer f.mu.Unlock()
 	f.log("force-cancel")
 	f.run.Status = "completed"
+	f.cancelJobs()
 	return nil
 }
 
@@ -85,6 +96,12 @@ func (f *fake) rerun(kind string) error {
 	f.routing = f.vars["SPARECI_RUNS_ON"]
 	f.run.RunAttempt++
 	f.run.Status = "queued"
+	for i, j := range f.jobs {
+		again := kind == "rerun-all" || (j.Conclusion != "success" && j.Name != f.skip)
+		if again {
+			f.jobs[i] = gh.Job{Name: j.Name, Status: "queued", RunAttempt: f.run.RunAttempt, Labels: []string{"ubuntu-24.04"}}
+		}
+	}
 	return nil
 }
 
@@ -128,6 +145,33 @@ func TestRescueReRunsWithRoutingCleared(t *testing.T) {
 	}
 	if !contains(f.calls, "rerun-failed") {
 		t.Errorf("calls %v: want a failed-jobs re-run", f.calls)
+	}
+}
+
+func TestRescueReRunsEverythingIfGitHubSkipsAJob(t *testing.T) {
+	f := newFake()
+	f.skip = "build"
+	f.jobs = []gh.Job{
+		{Name: "build", Status: "queued", RunAttempt: 1, Labels: []string{"spareci"}},
+		{Name: "cache-save", Status: "queued", RunAttempt: 1, Labels: []string{"spareci"}},
+	}
+	r := router(f)
+	_ = r.Start(context.Background())
+	if err := r.Rescue(context.Background(), 7, false); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"cancel", "delete SPARECI_RUNS_ON", "rerun-failed", "cancel", "rerun-all", "set SPARECI_RUNS_ON"}
+	got := f.calls[2:] // after Start's two sets
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("calls %v, want %v", got, want)
+	}
+	for _, j := range f.jobs {
+		if j.RunAttempt != 3 {
+			t.Errorf("job %s left at attempt %d", j.Name, j.RunAttempt)
+		}
+	}
+	if f.routing != "" {
+		t.Errorf("whole re-run created with routing %q", f.routing)
 	}
 }
 

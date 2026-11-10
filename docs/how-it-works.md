@@ -31,6 +31,7 @@ On start, spareci sets the repo variable `SPARECI_RUNS_ON` to its label, so `run
 1. Cancel the run, and force-cancel it if it hasn't completed after a minute (a job held by a runner that went away can block a normal cancel).
 2. Delete the routing variable if it's set, re-run, wait for the new attempt to exist, and set the variable again. Runs created in those few seconds also go to GitHub, which is the safe direction.
 3. Re-run only the failed and cancelled jobs, unless a job in the run already finished on this machine. Then re-run the whole run: that job saved its caches to the local cache, and a later job re-run on GitHub couldn't restore them. Artifacts don't need this, because they always go through GitHub.
+4. Check that the failed-jobs re-run really included every cancelled job. In run 42889578581, two jobs queued here were cancelled together and GitHub's failed-jobs re-run only included one of them, so the run ended as cancelled even though everything it re-ran passed. If that happens, spareci cancels the new attempt and re-runs the whole run.
 
 This happens in three places:
 
