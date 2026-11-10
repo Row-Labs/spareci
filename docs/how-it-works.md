@@ -15,6 +15,7 @@
 | `internal/cache` | Local implementation of GitHub's cache service |
 | `internal/workflows` | `spareci init`: finds jobs' `runs-on`, judges which suit this machine, rewrites the chosen lines in place |
 | `internal/estimate` | `spareci estimate`: prices recent jobs at GitHub's list prices |
+| `internal/stats` | `spareci stats`: records each job this machine runs and what it would have cost |
 
 ## Job lifecycle
 
@@ -162,6 +163,22 @@ Each job that got a runner and finished is billed `ceil(completed_at - started_a
 - **Standard runner**: a GitHub image label (`ubuntu-24.04`, `macos-15`, `windows-11-arm`, `macos-15-xlarge`, ...). The API sometimes returns a null runner group for these.
 
 It checks `GET /rate_limit` before fetching jobs (one request per run) and stops if that would leave fewer than 100 calls. Requests go through the client's ETag cache and up to four run at once; a 5xx on a jobs request is retried twice.
+
+## Stats
+
+When a runner prints `Running job:`, `stats.Recorder` starts looking for the job on GitHub: it lists in-progress runs (and recent ones) and their jobs, and picks the job whose `runner_name` is this runner's name, which is unique. Doing this while the job runs means its run is still in progress and near the top of the list. When the runner exits:
+
+1. `GET /repos/{repo}/actions/jobs/{id}` until the job shows `completed` (GitHub sets `completed_at` a moment after the runner exits). Its `started_at` and `completed_at` are what GitHub bills by, so they replace this machine's clock.
+2. `GET .../runs/{run_id}` for the workflow file's path; the job gives the commit (`head_sha`).
+3. `GET /repos/{repo}/contents/{path}?ref={sha}`, parsed by `internal/workflows`, cached per (path, sha) for the life of the process. The job GitHub names (`build`, `Unit tests (20)` for a matrix entry, a `name:` with expressions) is matched to its key; two jobs that could match is an error, not a pick.
+4. The fallback is read from the two `runs-on` forms `spareci init` writes, `vars.X || 'label'` and `vars.X || fromJSON('[...]')`. Anything else is recorded with the reason.
+5. One JSON line is appended to `<cache dir>/stats/jobs.jsonl` with `O_APPEND` in a single write, so several `spareci up` processes share the file. `spareci stats` skips (and counts) a line a crash cut short.
+
+If GitHub can't be reached, the job is still recorded, with this machine's times and no fallback, so it shows as not counted rather than disappearing. `^C` waits up to a minute for jobs still being recorded.
+
+Pricing happens when `stats` runs, not when the job is recorded, through `estimate.ForLabels` and `estimate.Minutes`, the same code `estimate` bills with; `TestPriceMatchesEstimate` checks that the two agree.
+
+Verified live on 2026-11-10: `spareci up` ran CI run 42906945251 (`build`, `cache-save`, `cache-restore`) and recorded all three with GitHub's times, job IDs and the `ubuntu-24.04` fallback read from `ci.yml` at the run's commit, priced as Linux 2-core: 3 min, $0.018.
 
 ## Testing
 

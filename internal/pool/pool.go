@@ -16,6 +16,7 @@ import (
 	"github.com/Row-Labs/spareci/internal/gh"
 	"github.com/Row-Labs/spareci/internal/route"
 	"github.com/Row-Labs/spareci/internal/runner"
+	"github.com/Row-Labs/spareci/internal/stats"
 )
 
 type Config struct {
@@ -26,8 +27,9 @@ type Config struct {
 	Router   *route.Router // routing variable and heartbeat; nil disables routing
 	MaxWait  time.Duration // a job queued here longer than this goes to GitHub-hosted runners; 0 disables
 	DryRun   bool
-	Cache    *cache.Server // nil: jobs use GitHub's cache service
-	Gate     Gate          // nil: always take jobs; see gate.go
+	Cache    *cache.Server   // nil: jobs use GitHub's cache service
+	Gate     Gate            // nil: always take jobs; see gate.go
+	Stats    *stats.Recorder // nil: don't record jobs
 }
 
 type Pool struct {
@@ -35,9 +37,10 @@ type Pool struct {
 	gh   *gh.Client
 	host *runner.Host
 
-	mu      sync.Mutex
-	workers map[string]*worker
-	seq     int
+	mu        sync.Mutex
+	workers   map[string]*worker
+	seq       int
+	recording sync.WaitGroup // jobs being written to the stats file
 
 	// Laptop mode (gate.go); only touched by the poll loop.
 	paused, routed bool
@@ -269,14 +272,22 @@ func (p *Pool) spawn(ctx, hardCtx context.Context) error {
 			defer jl.Close()
 		}
 		res, err := p.host.Run(runCtx, name, jit.Config, env, func(job string) {
+			now := time.Now()
 			p.mu.Lock()
-			w.started, w.job = time.Now(), job
+			w.started, w.job = now, job
 			p.mu.Unlock()
+			if p.cfg.Stats != nil {
+				p.cfg.Stats.Started(name, now)
+			}
 		})
 
 		p.mu.Lock()
 		delete(p.workers, name)
+		started := w.started
 		p.mu.Unlock()
+		if res.Job != "" && p.cfg.Stats != nil {
+			p.record(stats.Finished{Runner: name, Job: res.Job, Conclusion: res.Conclusion, Started: started, Ended: time.Now()})
+		}
 
 		// A JIT runner that never took a job stays registered; clean it up.
 		if res.Job == "" {
@@ -290,6 +301,31 @@ func (p *Pool) spawn(ctx, hardCtx context.Context) error {
 		}
 	}()
 	return nil
+}
+
+// record adds a finished job to the stats file in the background. It asks
+// GitHub about the job, which can take a little while after the job ends.
+func (p *Pool) record(f stats.Finished) {
+	p.recording.Add(1)
+	go func() {
+		defer p.recording.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		if _, err := p.cfg.Stats.Done(ctx, f); err != nil {
+			slog.Warn("could not record job stats", "job", f.Job, "err", err)
+		}
+	}()
+}
+
+// waitRecording waits up to d for jobs still being recorded.
+func (p *Pool) waitRecording(d time.Duration) {
+	done := make(chan struct{})
+	go func() { p.recording.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(d):
+		slog.Warn("stopped before every finished job was added to spareci stats")
+	}
 }
 
 // rescueQueued sends every job still queued for this machine to
@@ -358,6 +394,7 @@ func (p *Pool) drain(hardCtx context.Context) error {
 		left := len(p.workers)
 		p.mu.Unlock()
 		if left == 0 {
+			p.waitRecording(time.Minute)
 			return nil
 		}
 		if busy > 0 {
