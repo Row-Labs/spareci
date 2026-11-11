@@ -14,6 +14,7 @@ import (
 
 	"github.com/Row-Labs/spareci/internal/estimate"
 	"github.com/Row-Labs/spareci/internal/gh"
+	"github.com/Row-Labs/spareci/internal/route"
 )
 
 type repoList []string
@@ -102,6 +103,9 @@ func estimateCmd(args []string) error {
 	host := estimate.Host{
 		OS:   map[string]string{"darwin": "macOS", "linux": "Linux", "windows": "Windows"}[runtime.GOOS],
 		Arch: map[string]string{"arm64": "ARM64", "amd64": "X64"}[runtime.GOARCH],
+	}
+	for _, a := range containerLinux() {
+		host.Linux = append(host.Linux, map[string]string{route.ARM64: "ARM64", route.X64: "X64"}[a])
 	}
 	rep := estimate.Build(jobs, host, names, runs, from, to)
 	if *asJSON {

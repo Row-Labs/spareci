@@ -15,7 +15,7 @@ go build -o bin/spareci ./cmd/spareci
 
 ## Trying a change end to end
 
-Use a private test repo you admin. Run spareci against it, and push a workflow whose `runs-on` is `${{ vars.SPARECI_RUNS_ON || 'ubuntu-24.04' }}`:
+Use a private test repo you admin. Run spareci against it, and push a workflow whose `runs-on` is `${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-24.04' }}` (on a Mac without a container runtime, `${{ vars.SPARECI_RUNS_ON_MACOS || 'macos-15' }}`):
 
 ```sh
 ./bin/spareci up --repo you/test-repo -v

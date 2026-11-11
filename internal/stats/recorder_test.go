@@ -79,11 +79,11 @@ func TestRecorder(t *testing.T) {
 	local := time.Now()
 
 	r.Started("spareci-Eventric-1794345622-2", local)
-	rec, err := r.Done(ctx, Finished{Runner: "spareci-Eventric-1794345622-2", Job: "build", Conclusion: "Succeeded", Started: local, Ended: local.Add(time.Minute)})
+	rec, err := r.Done(ctx, Finished{Runner: "spareci-Eventric-1794345622-2", Backend: "linux-arm64", Job: "build", Conclusion: "Succeeded", Started: local, Ended: local.Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.JobID != 130137251602 || rec.RunID != 42904037716 || rec.WorkflowPath != ".github/workflows/ci.yml" || rec.Workflow != "CI" {
+	if rec.JobID != 130137251602 || rec.RunID != 42904037716 || rec.WorkflowPath != ".github/workflows/ci.yml" || rec.Workflow != "CI" || rec.Backend != "linux-arm64" {
 		t.Errorf("record ids = %+v", rec)
 	}
 	// GitHub's billed times, read once the job showed as completed.

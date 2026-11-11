@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -135,6 +136,18 @@ var retryDelay = time.Second
 type Host struct {
 	OS   string `json:"os"`   // macOS, Linux
 	Arch string `json:"arch"` // ARM64, X64
+	// Linux lists the architectures (ARM64, X64) a Mac runs Linux jobs for
+	// in containers; empty without a container runtime.
+	Linux []string `json:"linux_containers,omitempty"`
+}
+
+// Takes reports whether the host can run jobs for a runner: natively, or a
+// Linux one in a container on a Mac.
+func (h Host) Takes(os, arch string) bool {
+	if os == h.OS && arch == h.Arch {
+		return true
+	}
+	return os == "Linux" && h.OS == "macOS" && slices.Contains(h.Linux, arch)
 }
 
 // Line is the usage of one runner type.
@@ -269,7 +282,7 @@ func Build(jobs []Job, host Host, repos []string, runs int, from, to time.Time) 
 		l := lines[sku]
 		if l == nil {
 			p, _ := Price(sku)
-			l = &Line{Runner: p, Fits: p.OS == host.OS && p.Arch == host.Arch}
+			l = &Line{Runner: p, Fits: host.Takes(p.OS, p.Arch)}
 			lines[sku] = l
 		}
 		l.Jobs++
@@ -320,15 +333,26 @@ func caveats(r Report) []string {
 	c := []string{
 		"List prices. Your plan's included usage ($12/mo Free, $18 Pro and Team, $300 Enterprise Cloud) comes off the bill first, so a small bill may already be $0.",
 	}
-	var otherArch, otherOS int
+	var otherArch, otherOS, noRuntime, inContainers int
 	for _, l := range r.Hosted {
 		switch {
 		case l.Fits:
+			if l.OS != r.Host.OS {
+				inContainers += l.Minutes
+			}
 		case l.OS == r.Host.OS:
 			otherArch += l.Minutes
+		case l.OS == "Linux" && r.Host.OS == "macOS" && len(r.Host.Linux) == 0:
+			noRuntime += l.Minutes
 		default:
 			otherOS += l.Minutes
 		}
+	}
+	if inContainers > 0 {
+		c = append(c, fmtInt(inContainers)+" min are Linux jobs this Mac would run in containers, which have fewer tools preinstalled than GitHub's Ubuntu image.")
+	}
+	if noRuntime > 0 {
+		c = append(c, fmtInt(noRuntime)+" min are Linux jobs this Mac could take in containers with a container runtime (OrbStack, Docker Desktop or Colima) running; they aren't counted.")
 	}
 	if otherArch > 0 {
 		c = append(c, fmtInt(otherArch)+" min ran on "+r.Host.OS+" with another CPU architecture; they could move only if the jobs don't depend on it.")

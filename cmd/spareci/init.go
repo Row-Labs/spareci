@@ -18,15 +18,21 @@ import (
 	"github.com/Row-Labs/spareci/internal/workflows"
 )
 
-const initUsage = `Usage: spareci init [--jobs workflow:job,...] [--all-compatible] [--dry-run]
+const initUsage = `Usage: spareci init [--jobs workflow:job,...] [--all-compatible] [--upgrade] [--dry-run]
 
 Opts a repo's workflow jobs in to spareci: rewrites each chosen job's runs-on to
-  runs-on: ${{ vars.SPARECI_RUNS_ON || '<original>' }}
-and opens a pull request with the change. While spareci is up, those jobs run
-on this machine; otherwise they run where they did before.
+  runs-on: ${{ vars.SPARECI_RUNS_ON_<OS> || '<original>' }}
+and opens a pull request with the change. <OS> is MACOS, LINUX (x64) or
+LINUX_ARM, from the original runner. While spareci is up on a machine that
+runs that kind of job, the job runs there; otherwise it runs where it did
+before. A Mac with a container runtime takes Linux jobs too.
+
+Jobs converted by spareci 0.1 use one variable, SPARECI_RUNS_ON, for every
+OS. init offers to move them to their per-OS variable (--upgrade does it
+without asking).
 
 Run it in the repo. With a terminal it asks which jobs to convert; otherwise
-pass --jobs or --all-compatible.
+pass --jobs, --all-compatible or --upgrade.
 
 `
 
@@ -36,9 +42,10 @@ func initCmd(args []string) error {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, initUsage); fs.PrintDefaults() }
 	jobsFlag := fs.String("jobs", "", "jobs to convert, as workflow:job,... (workflow is the file name)")
 	all := fs.Bool("all-compatible", false, "convert every job recommended for this machine")
+	upgrade := fs.Bool("upgrade", false, "move jobs routed by the old SPARECI_RUNS_ON to their per-OS variable")
 	dry := fs.Bool("dry-run", false, "show the diff; change nothing")
 	label := fs.String("label", "spareci", "label that routes a job to this machine (as for spareci up)")
-	vname := fs.String("fallback-var", workflows.DefaultVar, "repo variable spareci sets while up")
+	vname := fs.String("fallback-var", workflows.DefaultVar, "base name of the repo variables spareci sets while up")
 	branch := fs.String("branch", "spareci-init", "branch to commit to")
 	base := fs.String("base", "", "pull request base (default: the current branch)")
 	_ = fs.Parse(args)
@@ -60,33 +67,50 @@ func initCmd(args []string) error {
 	} else if err != nil {
 		return err
 	}
-	m := workflows.Machine{OS: runtime.GOOS, Arch: runtime.GOARCH, Labels: append(runner.DefaultLabels(), *label)}
+	m := workflows.Machine{OS: runtime.GOOS, Arch: runtime.GOARCH, Labels: append(runner.DefaultLabels(), *label), Linux: containerLinux()}
 	m.Assess(files)
 
 	choices := workflows.Convertible(files)
+	upgrades := workflows.Upgradable(files)
 	printJobs(files, choices, m)
-	if len(choices) == 0 {
+	if len(choices) == 0 && len(upgrades) == 0 {
 		fmt.Println("\nNothing to convert.")
 		return nil
 	}
 
 	interactive := isTerminal(os.Stdin)
 	var chosen []*workflows.Job
+	if len(upgrades) > 0 {
+		fmt.Printf("\n%s still use%s %s, which spareci routes only to a machine's own OS and will stop setting in a later release.\n",
+			plural(len(upgrades), "job"), map[bool]string{true: "s"}[len(upgrades) == 1], *vname)
+		switch {
+		case *upgrade:
+			chosen = upgrades
+		case interactive && confirm("Move them to their per-OS variable?"):
+			chosen = upgrades
+		case !interactive:
+			fmt.Println("Pass --upgrade to move them to their per-OS variable.")
+		}
+	}
+	var picked []*workflows.Job
 	switch {
+	case len(choices) == 0:
+	case *upgrade && *jobsFlag == "" && !*all:
 	case *jobsFlag != "":
-		chosen, err = workflows.Select(files, *jobsFlag)
+		picked, err = workflows.Select(files, *jobsFlag)
 	case *all:
-		if chosen = workflows.Recommended(files); len(chosen) == 0 {
+		if picked = workflows.Recommended(files); len(picked) == 0 {
 			err = fmt.Errorf("no job is recommended for this machine; name jobs with --jobs")
 		}
 	case interactive:
-		chosen, err = prompt(choices, workflows.Recommended(files))
-	default:
+		picked, err = prompt(choices, workflows.Recommended(files))
+	case len(chosen) == 0:
 		err = fmt.Errorf("choose jobs with --jobs workflow:job,... or --all-compatible")
 	}
 	if err != nil {
 		return err
 	}
+	chosen = append(chosen, picked...)
 	if len(chosen) == 0 {
 		fmt.Println("Nothing chosen.")
 		return nil
@@ -111,7 +135,7 @@ func initCmd(args []string) error {
 	if interactive && !confirm("\nCommit this to a new branch "+*branch+", push it and open a pull request?") {
 		return nil
 	}
-	return openPR(root, *branch, *base, *vname, chosen, changes)
+	return openPR(root, *branch, *base, chosen, changes)
 }
 
 func printJobs(files []*workflows.File, choices []*workflows.Job, m workflows.Machine) {
@@ -119,7 +143,13 @@ func printJobs(files []*workflows.File, choices []*workflows.Job, m workflows.Ma
 	for i, j := range choices {
 		num[j] = i + 1
 	}
-	fmt.Printf("Jobs in %s (this machine: %s %s):\n\n", workflows.Dir, map[string]string{"darwin": "macOS", "linux": "Linux"}[m.OS], m.Arch)
+	takes := ""
+	if len(m.Linux) > 0 {
+		takes = ", and Linux " + strings.Join(m.Linux, "/") + " in containers"
+	} else if m.OS == "darwin" {
+		takes = "; no container runtime, so no Linux jobs"
+	}
+	fmt.Printf("Jobs in %s (this machine: %s %s%s):\n\n", workflows.Dir, map[string]string{"darwin": "macOS", "linux": "Linux"}[m.OS], m.Arch, takes)
 	tw := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
 	for _, f := range files {
 		for _, j := range f.Jobs {
@@ -129,10 +159,12 @@ func printJobs(files []*workflows.File, choices []*workflows.Job, m workflows.Ma
 			}
 			var note string
 			switch {
+			case j.Upgrade:
+				note = "upgrade: " + j.RoutedBy + " → " + j.Var
 			case j.Skip != "":
 				note = "skip: " + j.Skip
 			case j.Fit == workflows.FitGood:
-				note = "recommended"
+				note = "recommended, via " + j.Var
 			case j.Fit == workflows.FitNo:
 				note = "can't run here: " + j.Why
 			default:
@@ -210,7 +242,7 @@ func confirm(q string) bool {
 // openPR commits the changes on a new branch off HEAD, pushes it and opens a
 // pull request into base. HEAD must match origin's base, so the pull request
 // holds only this commit.
-func openPR(root, branch, base, vname string, chosen []*workflows.Job, changes []workflows.Change) error {
+func openPR(root, branch, base string, chosen []*workflows.Job, changes []workflows.Change) error {
 	var paths []string
 	for _, c := range changes {
 		paths = append(paths, c.File.Path)
@@ -277,7 +309,7 @@ func openPR(root, branch, base, vname string, chosen []*workflows.Job, changes [
 	if _, err := git(root, "push", "-u", "origin", branch); err != nil {
 		return err
 	}
-	url, err := ghCLI(root, strings.NewReader(prBody(vname, chosen)), "pr", "create",
+	url, err := ghCLI(root, strings.NewReader(prBody(chosen)), "pr", "create",
 		"--base", base, "--head", branch,
 		"--title", "Run "+plural(len(chosen), "job")+" on spareci when it's up",
 		"--body-file", "-")
@@ -289,9 +321,9 @@ func openPR(root, branch, base, vname string, chosen []*workflows.Job, changes [
 	return nil
 }
 
-func prBody(vname string, chosen []*workflows.Job) string {
-	example := "ubuntu-24.04"
-	if l := chosen[0].Labels; len(l) == 1 {
+func prBody(chosen []*workflows.Job) string {
+	example, vname := "ubuntu-24.04", chosen[0].Var
+	if l := fallbackOf(chosen[0]); len(l) == 1 {
 		example = l[0]
 	}
 	var b strings.Builder
@@ -307,15 +339,16 @@ Each job's ` + "`runs-on`" + ` becomes:
 
 ` + "```yaml\nruns-on: ${{ vars." + vname + " || '" + example + "' }}\n```" + `
 
-While ` + "`spareci up`" + ` is running, it sets the repo variable ` + "`" + vname + "`" + ` to its runner label, so these jobs go to that machine. When it stops, it deletes the variable and the expression falls back to the original label: the jobs run on GitHub-hosted runners exactly as before. Nothing changes until someone runs spareci.
+There's one variable per kind of runner: ` + "`SPARECI_RUNS_ON_MACOS`, `SPARECI_RUNS_ON_LINUX` (x64) and `SPARECI_RUNS_ON_LINUX_ARM`" + `. While ` + "`spareci up`" + ` is running on a machine that can run a kind of job (a Mac runs macOS jobs natively and Linux jobs in containers), it sets that variable to its runner label, so those jobs go to that machine. When it stops, it deletes the variables and the expression falls back to the original label: the jobs run on GitHub-hosted runners exactly as before. Nothing changes until someone runs spareci.
 
 ## Jobs
 
-| Job | Falls back to |
-|---|---|
+| Job | Variable | Falls back to |
+|---|---|---|
 `)
 	for _, j := range chosen {
-		fmt.Fprintf(&b, "| `%s` | `%s` |\n", j.Name(), strings.ReplaceAll(j.RunsOn, "|", `\|`))
+		fb := strings.Join(fallbackOf(j), ", ")
+		fmt.Fprintf(&b, "| `%s` | `%s` | `%s` |\n", j.Name(), j.Var, strings.ReplaceAll(fb, "|", `\|`))
 	}
 	b.WriteString("\nOpened by `spareci init`.\n")
 	return b.String()
@@ -357,4 +390,12 @@ func run(dir string, stdin *strings.Reader, name string, args ...string) (string
 		return "", fmt.Errorf("%s %s: %v: %s", name, args[0], err, strings.TrimSpace(errb.String()))
 	}
 	return strings.TrimSpace(out.String()), nil
+}
+
+// fallbackOf is the runs-on a job falls back to once converted.
+func fallbackOf(j *workflows.Job) []string {
+	if j.Upgrade {
+		return j.Fallback
+	}
+	return j.Labels
 }

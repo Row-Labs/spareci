@@ -18,31 +18,38 @@ import (
 // another variable) can't be known from the file, so it's an error rather
 // than a guess. Actions expressions are case-insensitive, and so is this.
 func Fallback(runsOn, varName string) ([]string, error) {
-	re := regexp.MustCompile(`(?is)^\s*\$\{\{\s*vars\.` + regexp.QuoteMeta(varName) + `\s*\|\|\s*(.*?)\s*\}\}\s*$`)
+	fb, _, err := FallbackVar(runsOn, varName)
+	return fb, err
+}
+
+// FallbackVar is Fallback, plus which routing variable the runs-on reads:
+// varName itself or one of its per-OS forms (varName_MACOS, ...).
+func FallbackVar(runsOn, varName string) ([]string, string, error) {
+	re := regexp.MustCompile(`(?is)^\s*\$\{\{\s*vars\.(` + regexp.QuoteMeta(varName) + `(?:_MACOS|_LINUX_ARM|_LINUX)?)\s*\|\|\s*(.*?)\s*\}\}\s*$`)
 	m := re.FindStringSubmatch(runsOn)
 	if m == nil {
 		if strings.Contains(strings.ToLower(runsOn), "vars."+strings.ToLower(varName)) {
-			return nil, fmt.Errorf("runs-on %q isn't in the form spareci init writes", runsOn)
+			return nil, "", fmt.Errorf("runs-on %q isn't in the form spareci init writes", runsOn)
 		}
-		return nil, fmt.Errorf("runs-on %q has no vars.%s || ... fallback", runsOn, varName)
+		return nil, "", fmt.Errorf("runs-on %q has no vars.%s || ... fallback", runsOn, varName)
 	}
-	rest := m[1]
+	used, rest := m[1], m[2]
 	if s, ok := exprLiteral(rest); ok {
-		return []string{s}, nil
+		return []string{s}, used, nil
 	}
 	if fm := fromJSONRe.FindStringSubmatch(rest); fm != nil {
 		js, _ := exprLiteral(fm[1])
 		var list []string
 		if err := json.Unmarshal([]byte(js), &list); err == nil && len(list) > 0 {
-			return list, nil
+			return list, used, nil
 		}
 		var one string
 		if err := json.Unmarshal([]byte(js), &one); err == nil && one != "" {
-			return []string{one}, nil
+			return []string{one}, used, nil
 		}
-		return nil, fmt.Errorf("fallback %s isn't a label or a list of labels", rest)
+		return nil, used, fmt.Errorf("fallback %s isn't a label or a list of labels", rest)
 	}
-	return nil, fmt.Errorf("fallback %s is an expression, not a label", rest)
+	return nil, used, fmt.Errorf("fallback %s is an expression, not a label", rest)
 }
 
 var (
@@ -59,15 +66,15 @@ func exprLiteral(s string) (string, bool) {
 	return strings.ReplaceAll(m[1], "''", "'"), true
 }
 
-func fallbackOf(v *yaml.Node, varName string) ([]string, string) {
+func fallbackOf(v *yaml.Node, varName string) ([]string, string, string) {
 	if v.Kind != yaml.ScalarNode {
-		return nil, "runs-on is a list or mapping with no fallback"
+		return nil, "", "runs-on is a list or mapping with no fallback"
 	}
-	fb, err := Fallback(v.Value, varName)
+	fb, used, err := FallbackVar(v.Value, varName)
 	if err != nil {
-		return nil, err.Error()
+		return nil, used, err.Error()
 	}
-	return fb, ""
+	return fb, used, ""
 }
 
 // FindJob finds the job GitHub reports by display name: the job's name: if it

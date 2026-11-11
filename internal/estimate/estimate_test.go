@@ -321,3 +321,21 @@ func TestSKUs(t *testing.T) {
 }
 
 func near(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
+
+func TestMacWithLinuxContainers(t *testing.T) {
+	jobs, runs, _ := Collect(context.Background(), fixtureAPI(t, nil), repos, from, to, nil, nil)
+	plain := Build(jobs, mac, nil, runs, from, to)
+	r := Build(jobs, Host{OS: "macOS", Arch: "ARM64", Linux: []string{"ARM64", "X64"}}, nil, runs, from, to)
+	// Every Linux minute (16: x64 standard and larger, and arm64) on top of macOS.
+	if r.FitMinutes != plain.FitMinutes+16 {
+		t.Errorf("fit %d min, want %d", r.FitMinutes, plain.FitMinutes+16)
+	}
+	cav := strings.Join(r.Caveats, "\n")
+	if !strings.Contains(cav, "16 min are Linux jobs this Mac would run in containers") || strings.Contains(cav, "container runtime") {
+		t.Errorf("caveats: %q", r.Caveats)
+	}
+	arm := Build(jobs, Host{OS: "macOS", Arch: "ARM64", Linux: []string{"ARM64"}}, nil, runs, from, to)
+	if arm.FitMinutes != plain.FitMinutes+1 {
+		t.Errorf("arm64 containers only: fit %d, want %d", arm.FitMinutes, plain.FitMinutes+1)
+	}
+}

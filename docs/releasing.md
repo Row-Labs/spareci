@@ -1,6 +1,6 @@
 # Releasing
 
-Releases are built by [GoReleaser](https://goreleaser.com) from `.goreleaser.yaml`, run by `.github/workflows/release.yml` when a `v*` tag is pushed. That workflow always runs on GitHub-hosted runners (`ubuntu-24.04`), never through `SPARECI_RUNS_ON`, so a release never depends on someone's machine being up.
+Releases are built by [GoReleaser](https://goreleaser.com) from `.goreleaser.yaml`, run by `.github/workflows/release.yml` when a `v*` tag is pushed. That workflow always runs on GitHub-hosted runners (`ubuntu-24.04`), never through a spareci routing variable, so a release never depends on someone's machine being up.
 
 Each release publishes:
 

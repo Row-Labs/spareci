@@ -85,11 +85,7 @@ func Platform() (string, error) {
 }
 
 // DefaultLabels are the labels GitHub would give a self-hosted runner here.
-func DefaultLabels() []string {
-	osLabel := map[string]string{"darwin": "macOS", "linux": "Linux"}[runtime.GOOS]
-	arch := map[string]string{"arm64": "ARM64", "amd64": "X64"}[runtime.GOARCH]
-	return []string{"self-hosted", osLabel, arch}
-}
+func DefaultLabels() []string { return SelfHostedLabels(HostOS(), HostArch()) }
 
 // Install downloads and unpacks the runner if this version is not there yet.
 func (h *Host) Install(ctx context.Context) error {

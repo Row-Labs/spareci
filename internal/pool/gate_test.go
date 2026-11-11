@@ -135,13 +135,13 @@ func newTestPool(t *testing.T, g Gate) (*Pool, *fakeGitHub) {
 	client := gh.NewWithBase(srv.URL, "test")
 	p := New(Config{
 		Repo:     "o/r",
-		Labels:   []string{"self-hosted", "spareci"},
+		Backends: []*Backend{{Backend: &fakeBackend{os: "macos", arch: "arm64"}, Routing: []string{"spareci"}}},
 		Max:      0, // never spawn a real runner
 		Interval: time.Hour,
-		Router: &route.Router{API: client, Repo: "o/r", Var: "SPARECI_RUNS_ON", Value: "spareci",
+		Router: &route.Router{API: client, Repo: "o/r", Routes: []route.Route{{Var: "SPARECI_RUNS_ON", Label: "spareci"}},
 			HeartbeatVar: "SPARECI_HEARTBEAT", Poll: time.Millisecond},
 		Gate: g,
-	}, client, nil)
+	}, client)
 	return p, fg
 }
 
@@ -169,8 +169,9 @@ func TestGatePausesAndResumes(t *testing.T) {
 
 	// An idle runner and a busy one.
 	var idleCancelled, busyCancelled bool
-	p.workers["idle"] = &worker{name: "idle", spawned: time.Now(), cancel: func() { idleCancelled = true }}
-	p.workers["busy"] = &worker{name: "busy", spawned: time.Now(), started: time.Now(), job: "x", cancel: func() { busyCancelled = true }}
+	b := p.cfg.Backends[0]
+	p.workers["idle"] = &worker{name: "idle", backend: b, spawned: time.Now(), cancel: func() { idleCancelled = true }}
+	p.workers["busy"] = &worker{name: "busy", backend: b, spawned: time.Now(), started: time.Now(), job: "x", cancel: func() { busyCancelled = true }}
 
 	// Unplug: routing and heartbeat cleared, idle runner stopped, busy one
 	// left alone, and the job queued here is re-run on GitHub.
