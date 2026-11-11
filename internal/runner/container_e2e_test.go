@@ -27,6 +27,7 @@ func TestContainerE2E(t *testing.T) {
 		t.Run(arch, func(t *testing.T) {
 			ctx := context.Background()
 			c := &Container{Root: t.TempDir(), Version: version, Target: arch, Repo: "spareci/e2e-test"}
+			t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "-f", c.ToolCacheVolume()).Run() })
 			start := time.Now()
 			var log strings.Builder
 			if err := c.Prepare(ctx, &log); err != nil {
