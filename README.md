@@ -55,7 +55,7 @@ Requires macOS or Linux (arm64 or x64), the [`gh` CLI](https://cli.github.com) l
 Homebrew (macOS and Linux):
 
 ```sh
-brew install row-labs/tap/spareci
+brew install row-labs/spareci/spareci
 ```
 
 Or download a prebuilt binary from the [latest release](https://github.com/Row-Labs/spareci/releases/latest). Pick `darwin` or `linux` and `arm64` or `amd64`:
