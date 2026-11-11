@@ -50,8 +50,6 @@ It reads your runs and jobs through the GitHub API and changes nothing. Each job
 
 Requires macOS or Linux (arm64 or x64), the [`gh` CLI](https://cli.github.com) logged in, and admin rights on the repo (registering runners needs them).
 
-> These commands work once the repo is public. Until then, build from a clone (see [CONTRIBUTING.md](CONTRIBUTING.md)).
-
 Homebrew (macOS and Linux). Homebrew only loads casks from taps you've trusted, so trust the spareci tap first:
 
 ```sh
