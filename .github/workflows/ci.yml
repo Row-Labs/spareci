@@ -34,7 +34,8 @@ jobs:
       - name: Self-hosted jobs must use the local cache
         if: runner.environment == 'self-hosted'
         run: |
-          case "$ACTIONS_RESULTS_URL" in http://127.0.0.1:*) ;; *) echo "::error::cache is not local"; exit 1;; esac
+          # 127.0.0.1 on the host; host.docker.internal from a Linux job container on a Mac.
+          case "$ACTIONS_RESULTS_URL" in http://127.0.0.1:*|http://host.docker.internal:*) ;; *) echo "::error::cache is not local"; exit 1;; esac
       - run: mkdir -p payload && head -c 20000000 /dev/urandom > payload/blob && shasum -a 256 payload/blob | tee payload.sha
       - uses: actions/cache/save@v4
         with:
