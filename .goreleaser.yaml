@@ -69,7 +69,8 @@ release:
     name: spareci
 
 # `brew install row-labs/spareci/spareci`. Pushes Casks/spareci.rb to
-# Row-Labs/homebrew-spareci using the HOMEBREW_TAP_TOKEN secret.
+# Row-Labs/homebrew-spareci over SSH with a deploy key that can write to that
+# one repo only (the HOMEBREW_TAP_DEPLOY_KEY secret; see docs/releasing.md).
 homebrew_casks:
   - name: spareci
     binaries: [spareci]
@@ -79,7 +80,10 @@ homebrew_casks:
     repository:
       owner: Row-Labs
       name: homebrew-spareci
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+      branch: main
+      git:
+        url: git@github.com:Row-Labs/homebrew-spareci.git
+        private_key: "{{ .Env.HOMEBREW_TAP_DEPLOY_KEY }}"
     commit_author:
       name: spareci-release
       email: noreply@github.com
