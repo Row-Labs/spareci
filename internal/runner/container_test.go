@@ -330,3 +330,25 @@ func TestContainerArches(t *testing.T) {
 		t.Errorf("Apple Silicon: %v", got)
 	}
 }
+
+func TestDaemonSocket(t *testing.T) {
+	none := func() string { return "" }
+	for _, tc := range []struct {
+		goos, dockerHost, context, want string
+	}{
+		{"darwin", "unix:///Users/me/.orbstack/run/docker.sock", "", "/var/run/docker.sock"},
+		{"linux", "", "", "/var/run/docker.sock"},
+		{"linux", "unix:///run/user/1000/docker.sock", "", "/run/user/1000/docker.sock"},
+		{"linux", "", "unix:///run/user/1000/docker.sock", "/run/user/1000/docker.sock"},
+		{"linux", "tcp://10.0.0.2:2376", "", ""},
+	} {
+		ctx := none
+		if tc.context != "" {
+			v := tc.context
+			ctx = func() string { return v }
+		}
+		if got := daemonSocket(tc.goos, tc.dockerHost, ctx); got != tc.want {
+			t.Errorf("daemonSocket(%s, %q, %q) = %q, want %q", tc.goos, tc.dockerHost, tc.context, got, tc.want)
+		}
+	}
+}

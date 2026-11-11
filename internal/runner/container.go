@@ -107,6 +107,7 @@ type Container struct {
 
 	image      string // tag of the built image; set by Prepare
 	dockerRoot string // the daemon's data directory; set by Prepare
+	socket     string // the daemon's socket, as a path on the daemon's host; set by Prepare
 }
 
 var _ Backend = (*Container)(nil)
@@ -213,6 +214,13 @@ func (c *Container) Prepare(ctx context.Context, buildLog io.Writer) error {
 		return fmt.Errorf("%w: the docker daemon runs %q containers, not linux", ErrNoRuntime, osName)
 	}
 	if c.DockerMode == DockerSocket {
+		c.socket = daemonSocket(runtime.GOOS, os.Getenv("DOCKER_HOST"), func() string { return DockerHost(os.Environ()) })
+		if c.socket == "" {
+			slog.Warn("the docker daemon isn't on a local unix socket; Linux jobs get no docker", "DOCKER_HOST", os.Getenv("DOCKER_HOST"))
+			c.DockerMode = DockerNone
+		}
+	}
+	if c.DockerMode == DockerSocket {
 		out, err := d.Output(ctx, nil, "info", "--format", "{{.DockerRootDir}}")
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrNoRuntime, err)
@@ -291,6 +299,30 @@ func (c *Container) Prune(ctx context.Context) {
 	}
 }
 
+// daemonSocket is the path of the docker daemon's socket on the daemon's own
+// host, which is what a container mounts. On macOS the daemon runs in a VM
+// (OrbStack, Docker Desktop, Colima) at the standard path there, whatever
+// socket the Mac side uses. On Linux the daemon is local, so it is the socket
+// the CLI talks to: DOCKER_HOST, else the current context's (rootless Docker's
+// is under $XDG_RUNTIME_DIR). "" if that isn't a unix socket.
+func daemonSocket(goos, dockerHost string, contextHost func() string) string {
+	const std = "/var/run/docker.sock"
+	if goos == "darwin" {
+		return std
+	}
+	host := dockerHost
+	if host == "" {
+		host = contextHost()
+	}
+	if host == "" {
+		return std
+	}
+	if p, ok := strings.CutPrefix(host, "unix://"); ok && path.IsAbs(p) {
+		return p
+	}
+	return ""
+}
+
 // volumeName makes a docker volume name from parts.
 func volumeName(parts ...string) string {
 	n := strings.Join(parts, "-")
@@ -367,7 +399,7 @@ func (c *Container) runArgs(name, envFile, workVol string) []string {
 		// container: job, externals for its node) exist on the daemon too.
 		root := c.workRoot(workVol)
 		args = append(args,
-			"-v", "/var/run/docker.sock:/var/run/docker.sock",
+			"-v", c.socket+":/var/run/docker.sock",
 			"-v", workVol+":"+root,
 			"-e", "SPARECI_RUNNER_ROOT="+root)
 	}
