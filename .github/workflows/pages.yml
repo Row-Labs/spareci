@@ -1,14 +1,15 @@
 name: Site
 
-# Deploys site/ (spareci.dev) to GitHub Pages when it changes on main.
+# Deploys site/ to GitHub Pages (https://row-labs.github.io/spareci/) when it
+# changes on main.
 #
 # Inert until the owner turns it on:
 #   1. Settings → Pages → Source: "GitHub Actions". On a private repo, Pages
 #      needs a paid plan (Pro, Team or Enterprise); on a public repo it's free.
 #   2. Set the repo variable SITE_PAGES to "true". Until then the deploy job is
 #      skipped and uses no Actions minutes.
-#   3. For spareci.dev, add the custom domain under Settings → Pages once the
-#      domain's DNS points at GitHub Pages.
+#   3. Optional: a custom domain under Settings → Pages once its DNS points at
+#      GitHub Pages (then update the canonical and og:url in site/index.html).
 on:
   push:
     branches: [main]
