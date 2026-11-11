@@ -1,4 +1,4 @@
-# spareci.dev
+# spareci landing page
 
 The project's landing page. Plain HTML, CSS and JavaScript: no build step, no
 dependencies, no analytics, no third-party requests. System fonts.
