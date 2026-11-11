@@ -194,7 +194,7 @@ Each kind of job has its own repo variable, picked by the GitHub-hosted runner t
 | `SPARECI_RUNS_ON_LINUX` | `spareci-linux` | `ubuntu-*` (x64) | an x64 Linux machine; a Mac with an x64 container backend, or with `--linux-x64-on-arm` |
 | `SPARECI_RUNS_ON_LINUX_ARM` | `spareci-linux-arm` | `ubuntu-*-arm` | an arm64 Linux machine; an Apple Silicon Mac with a container runtime |
 
-On a Mac, Linux jobs run in a fresh container each (OrbStack, Docker Desktop or Colima). Without a running container runtime, the Mac sets only `SPARECI_RUNS_ON_MACOS`, and Linux jobs stay on GitHub. `--max` limits all jobs at once; `--max-macos` and `--max-linux` limit each kind.
+On a Mac, Linux jobs run in a fresh container each (OrbStack, Docker Desktop or Colima). Without a running container runtime, the Mac sets only `SPARECI_RUNS_ON_MACOS`, and Linux jobs stay on GitHub. `--max` limits all jobs at once; `--max-macos` and `--max-linux` limit each kind. Run spareci on one machine per repo for now: a second machine for the same repo shares the variables, and when one stops it briefly turns routing off for the other (see [how it works](docs/how-it-works.md#routing)).
 
 `ubuntu-24.04` means x64. Most jobs don't care, and an arm64 container runs natively on Apple Silicon, so `--linux-x64-on-arm` lets arm64 containers take those jobs when there's no x64 backend. Leave it off for jobs that download x64 binaries.
 

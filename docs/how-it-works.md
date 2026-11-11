@@ -43,6 +43,8 @@ Why per OS, and why architecture only for Linux: one variable meant a Linux job 
 
 Every variable shares one heartbeat (`SPARECI_HEARTBEAT`), and they go on and off together: start, `^C`, laptop mode and the watchdog all act on the whole set.
 
+**Known limitation: one machine per repo.** The variables and the heartbeat belong to the repo, not to a machine. If two machines run `spareci up` for the same repo (say a Mac and a Linux box both taking Linux x64 jobs), the one that stops or pauses deletes the shared variables and the heartbeat while the other is still up. The other sets them again on its next heartbeat, within a minute, and runs created in that gap go to GitHub-hosted runners, which is the safe direction. The watchdog also can't tell which machine died. Running several machines for one repo (a fleet) is future work.
+
 **When GitHub reads `vars`.** Once per run attempt, when the attempt is created, and not again when a job becomes ready. Checked on 2026-11-10 with a probe workflow (run 42887218442): with the variable set to a label no runner has, a job that `needs:` a 75-second job still got that label after the variable had been deleted during the wait. After a cancel and `rerun-failed-jobs`, attempt 2 read the deleted variable and ran on `ubuntu-24.04`. `rerun-failed-jobs` includes cancelled jobs. So clearing the variable only affects new runs and new attempts, and a job already queued for this machine stays queued until something re-runs it.
 
 **Sending a queued job back** (`route.Rescue`). GitHub has no per-job cancel and no way to move a queued job to another runner, so:
