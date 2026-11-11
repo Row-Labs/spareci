@@ -68,10 +68,10 @@
 <pre><code><span class="ln"> </span>jobs:
 <span class="ln"> </span>  test:
 <span class="del"><span class="ln">-</span>    runs-on: macos-15
-</span><span class="add"><span class="ln">+</span>    runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }}
+</span><span class="add"><span class="ln">+</span>    runs-on: ${{ vars.SPARECI_RUNS_ON_MACOS || 'macos-15' }}
 </span><span class="ln"> </span>    steps:
 <span class="ln"> </span>      - uses: actions/checkout@v5</code></pre>
-      <p class="diff-foot">While spareci is up, <code>SPARECI_RUNS_ON</code> points at your machine. Otherwise it's empty and the job runs on <code>macos-15</code>. <code>spareci init</code> makes this edit and opens the pull request for you.</p>
+      <p class="diff-foot">While spareci is up on a Mac, <code>SPARECI_RUNS_ON_MACOS</code> points at it. Otherwise it's empty and the job runs on <code>macos-15</code>. <code>spareci init</code> makes this edit and opens the pull request for you.</p>
     </figure>
   </div>
 </section>

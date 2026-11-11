@@ -8,10 +8,10 @@ spareci up --repo owner/name
 
 ```yaml
 # .github/workflows/ci.yml: the only change to your workflow
-runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }}
+runs-on: ${{ vars.SPARECI_RUNS_ON_MACOS || 'macos-15' }}
 ```
 
-`spareci init` makes that change for the jobs you pick and opens a pull request. While `spareci up` is running, those jobs run on your machine for free. Stop it, and they run on GitHub-hosted runners again. CI never sits waiting on a laptop that's asleep.
+`spareci init` makes that change for the jobs you pick and opens a pull request. While `spareci up` is running, those jobs run on your machine for free: macOS jobs on a Mac, and Linux jobs on a Linux machine or [on a Mac with a container runtime](#which-jobs-come-here). Stop it, and they run on GitHub-hosted runners again. CI never sits waiting on a laptop that's asleep.
 
 > **Status: early.** Jobs run directly on the host as your user, with a separate home directory (see [Security](#security)). Use it for private repos whose workflows you trust.
 
@@ -81,24 +81,27 @@ cd your-repo
 spareci init
 ```
 
-`init` lists every job in `.github/workflows`, recommends the ones this machine can take (same OS and architecture; macOS jobs need a Mac), and asks which to convert. It rewrites only those jobs' `runs-on` lines, shows the diff, then commits to a new branch, pushes it and opens a pull request. Nothing changes for anyone until spareci is running.
+`init` lists every job in `.github/workflows`, recommends the ones this machine can take (same OS and architecture; macOS jobs need a Mac; on a Mac with a running container runtime, Linux jobs too), and asks which to convert. It rewrites only those jobs' `runs-on` lines, shows the diff, then commits to a new branch, pushes it and opens a pull request. Nothing changes for anyone until spareci is running.
 
 ```sh
 spareci init --dry-run                          # show the diff, change nothing
 spareci init --all-compatible                   # no prompt: every recommended job
 spareci init --jobs ci:build,release:macos      # no prompt: these jobs (workflow file name:job id)
+spareci init --upgrade                          # no prompt: move SPARECI_RUNS_ON lines to the per-OS variables
 ```
 
-Without a terminal, pass `--jobs` or `--all-compatible`. The pull request goes into the branch you're on (`--base` to change it), which must match what's on GitHub.
+Without a terminal, pass `--jobs`, `--all-compatible` or `--upgrade`. The pull request goes into the branch you're on (`--base` to change it), which must match what's on GitHub.
 
 What it converts:
 
 | `runs-on` | Becomes |
 |---|---|
-| `macos-15` | `${{ vars.SPARECI_RUNS_ON \|\| 'macos-15' }}` |
-| `[self-hosted, macOS, ARM64]` | `${{ vars.SPARECI_RUNS_ON \|\| fromJSON('["self-hosted","macOS","ARM64"]') }}` |
+| `macos-15` | `${{ vars.SPARECI_RUNS_ON_MACOS \|\| 'macos-15' }}` |
+| `ubuntu-24.04` | `${{ vars.SPARECI_RUNS_ON_LINUX \|\| 'ubuntu-24.04' }}` |
+| `ubuntu-24.04-arm` | `${{ vars.SPARECI_RUNS_ON_LINUX_ARM \|\| 'ubuntu-24.04-arm' }}` |
+| `[self-hosted, macOS, ARM64]` | `${{ vars.SPARECI_RUNS_ON_MACOS \|\| fromJSON('["self-hosted","macOS","ARM64"]') }}` |
 
-A list keeps every label in its fallback, since a self-hosted runner has to carry them all. A self-hosted job is only offered if this machine has every label it asks for. `init` leaves alone, and says why: `runs-on` expressions (including `${{ matrix.os }}`; edit those by hand), runner groups, YAML aliases, reusable-workflow calls and jobs that are already converted. Jobs with `container:` or `services:` need Linux.
+The variable is the one for the runner the job falls back to (see [Which jobs come here](#which-jobs-come-here)); a label spareci doesn't know gets this machine's own. A list keeps every label in its fallback, since a self-hosted runner has to carry them all. A self-hosted job is only offered if this machine has every label it asks for. `init` leaves alone, and says why: `runs-on` expressions (including `${{ matrix.os }}`; edit those by hand), runner groups, YAML aliases, reusable-workflow calls, jobs that are already converted and the watchdog workflow. Jobs with `container:` or `services:` need a Linux machine.
 
 ## Use
 
@@ -106,6 +109,7 @@ A list keeps every label in its fallback, since a self-hosted runner has to carr
 cd your-repo
 spareci up                 # take jobs for this repo; ^C to stop
 spareci up --max 2         # run two jobs at once
+spareci up --max 3 --max-linux 1   # at most one of them a Linux job
 spareci up --dry-run       # show which queued jobs would come here, register nothing
 spareci status             # runners and queued jobs
 spareci up --job-home=user # give jobs your own HOME and environment, as before
@@ -147,7 +151,9 @@ spareci saved you $1.77 · 6 jobs · 28 min since Oct 20, 2026
   Self-hosted               1         2      $0.00
 ```
 
-The runner a job would have used is its fallback, the `'macos-15'` in `${{ vars.SPARECI_RUNS_ON || 'macos-15' }}`, read from the workflow file at the run's commit. Jobs are priced exactly as `spareci estimate` prices them: GitHub's timestamps, rounded up to the whole minute, at list price, free for standard runners in public repos. A job whose fallback spareci can't read (a `matrix.os` expression, a reusable workflow, a custom runner label) isn't priced or guessed; `stats` counts it separately and `--json` says why. Weeks start on Monday and months on the 1st, in local time. Each finished job also logs a line like `saved $0.434: 7 min on macOS standard; $1.77 in all over 6 jobs`. Amounts under $1 are shown to a tenth of a cent, so small Linux savings still add up visibly.
+Once the machine has run more than one kind of job, a `RAN ON` section splits them by backend: `macos-arm64` natively, `linux-arm64` in a container, and so on. Each record keeps its backend.
+
+The runner a job would have used is its fallback, the `'macos-15'` in `${{ vars.SPARECI_RUNS_ON_MACOS || 'macos-15' }}`, read from the workflow file at the run's commit. Jobs are priced exactly as `spareci estimate` prices them: GitHub's timestamps, rounded up to the whole minute, at list price, free for standard runners in public repos. A job whose fallback spareci can't read (a `matrix.os` expression, a reusable workflow, a custom runner label) isn't priced or guessed; `stats` counts it separately and `--json` says why. Weeks start on Monday and months on the 1st, in local time. Each finished job also logs a line like `saved $0.434: 7 min on macOS standard; $1.77 in all over 6 jobs`. Amounts under $1 are shown to a tenth of a cent, so small Linux savings still add up visibly.
 
 The record is a local file, `~/Library/Caches/spareci/stats/jobs.jsonl` (`~/.cache/spareci/stats/` on Linux), one line per job, shared by every repo on the machine. It stays on this machine.
 
@@ -164,7 +170,7 @@ spareci up --only-on-ac --idle 5m --hours 18:00-08:00   # all must hold
 
 When a condition stops holding, spareci pauses. It does what `^C` does, but keeps running:
 
-- It clears `SPARECI_RUNS_ON` (and the heartbeat), so new jobs go to GitHub-hosted runners.
+- It clears the routing variables (and the heartbeat), so new jobs go to GitHub-hosted runners.
 - It stops runners that haven't picked up a job. Running jobs finish.
 - Jobs already queued for this machine are sent to GitHub-hosted runners, as described [below](#when-this-machine-goes-away). A run with a job still in progress waits until that job ends, so pausing never throws away work.
 
@@ -178,7 +184,23 @@ When the conditions hold again, it routes jobs here again. Each change is logged
 
 If this machine can't measure a condition you asked for, `spareci up` says so and exits instead of ignoring it.
 
-Route only the jobs you want. A job is sent here when its `runs-on` labels are all ones this machine has: `self-hosted`, the OS (`macOS` or `Linux`), the arch (`ARM64` or `X64`) and `spareci` (change it with `--label`). The `vars.SPARECI_RUNS_ON || ...` form is what gives you the fallback, and spareci sets and clears that variable for you.
+### Which jobs come here
+
+Each kind of job has its own repo variable, picked by the GitHub-hosted runner the job falls back to. `spareci up` sets a variable only while this machine can run that kind of job, and clears it when it stops:
+
+| Variable | Set to | Jobs | Set by |
+|---|---|---|---|
+| `SPARECI_RUNS_ON_MACOS` | `spareci-macos` | `macos-*` | a Mac |
+| `SPARECI_RUNS_ON_LINUX` | `spareci-linux` | `ubuntu-*` (x64) | an x64 Linux machine; a Mac with an x64 container backend, or with `--linux-x64-on-arm` |
+| `SPARECI_RUNS_ON_LINUX_ARM` | `spareci-linux-arm` | `ubuntu-*-arm` | an arm64 Linux machine; an Apple Silicon Mac with a container runtime |
+
+On a Mac, Linux jobs run in a fresh container each (OrbStack, Docker Desktop or Colima). Without a running container runtime, the Mac sets only `SPARECI_RUNS_ON_MACOS`, and Linux jobs stay on GitHub. `--max` limits all jobs at once; `--max-macos` and `--max-linux` limit each kind.
+
+`ubuntu-24.04` means x64. Most jobs don't care, and an arm64 container runs natively on Apple Silicon, so `--linux-x64-on-arm` lets arm64 containers take those jobs when there's no x64 backend. Leave it off for jobs that download x64 binaries.
+
+A job is sent to a backend when its `runs-on` labels are all ones that backend's runners have: `self-hosted`, the OS (`macOS` or `Linux`), the arch (`ARM64` or `X64`) and its routing label (change the `spareci` prefix with `--label`). The `vars.SPARECI_RUNS_ON_* || ...` form is what gives you the fallback, and spareci sets and clears those variables for you.
+
+**Upgrading from 0.1.** spareci 0.1 used one variable, `SPARECI_RUNS_ON` (set to `spareci`), for every job, so a Linux job opted in on a Mac ran on macOS. spareci still sets `SPARECI_RUNS_ON` for the machine's own OS and architecture, so existing workflows keep working, but it's deprecated and will stop being set in a later release. Run `spareci init` (or `spareci init --upgrade`) to move those lines to their per-OS variable, and `spareci watchdog` to regenerate the watchdog, which clears every routing variable.
 
 ### Run it in the background
 
@@ -205,7 +227,7 @@ A job never waits on this machine for long:
 
   `--setup` opens GitHub in your browser twice: once to create a private GitHub App with a single permission (Variables: read and write), once to install it on this repo. It stores the app's client ID and key as repo secrets. Each watchdog run mints a token from them that lasts an hour, so there's nothing to renew. For a repo in an organization, the app belongs to the organization, which needs an org owner (or app manager) to create it.
 
-  While spareci is up it refreshes a heartbeat variable every minute. When the heartbeat is more than 5 minutes old, the watchdog clears the routing variable and re-runs jobs that were queued for this machine on GitHub-hosted runners. Expect that within about 15 to 20 minutes of the machine going away, longer if GitHub is slow to start scheduled workflows. While spareci is healthy, the watchdog's runs are skipped and use no Actions minutes. When the machine comes back, spareci turns routing on again by itself.
+  While spareci is up it refreshes a heartbeat variable every minute. When the heartbeat is more than 5 minutes old, the watchdog clears the routing variables and re-runs jobs that were queued for this machine on GitHub-hosted runners. Expect that within about 15 to 20 minutes of the machine going away, longer if GitHub is slow to start scheduled workflows. While spareci is healthy, the watchdog's runs are skipped and use no Actions minutes. When the machine comes back, spareci turns routing on again by itself.
 
   The app is needed because a workflow's own `GITHUB_TOKEN` can't change repo variables. If you'd rather not create an app, use a fine-grained personal access token instead (it expires, so set a reminder):
 
