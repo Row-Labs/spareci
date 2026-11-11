@@ -9,11 +9,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 
+	"github.com/Row-Labs/spareci/internal/route"
 	"github.com/Row-Labs/spareci/internal/runner"
 	"github.com/Row-Labs/spareci/internal/workflows"
 )
@@ -48,6 +50,7 @@ func initCmd(args []string) error {
 	vname := fs.String("fallback-var", workflows.DefaultVar, "base name of the repo variables spareci sets while up")
 	branch := fs.String("branch", "spareci-init", "branch to commit to")
 	base := fs.String("base", "", "pull request base (default: the current branch)")
+	x64OnARM := fs.Bool("linux-x64-on-arm", true, "on an arm64 machine, recommend Linux x64 jobs as they'll run (as arm64), as spareci up does by default")
 	_ = fs.Parse(args)
 	if fs.NArg() > 0 {
 		fs.Usage()
@@ -67,7 +70,10 @@ func initCmd(args []string) error {
 	} else if err != nil {
 		return err
 	}
-	m := workflows.Machine{OS: runtime.GOOS, Arch: runtime.GOARCH, Labels: append(runner.DefaultLabels(), *label), Linux: containerLinux()}
+	m := workflows.Machine{OS: runtime.GOOS, Arch: runtime.GOARCH, Labels: append(runner.DefaultLabels(), *label), Linux: containerLinux(), X64AsARM: *x64OnARM}
+	if m.X64AsARM && slices.Contains(m.Linux, route.ARM64) {
+		m.Linux = []string{route.ARM64} // as spareci up: no x64 containers, x64 jobs run as arm64
+	}
 	m.Assess(files)
 
 	choices := workflows.Convertible(files)
@@ -116,7 +122,7 @@ func initCmd(args []string) error {
 		return nil
 	}
 	for _, j := range chosen {
-		if j.Fit != workflows.FitGood {
+		if j.Why != "" {
 			fmt.Printf("note: %s: %s\n", j.Name(), j.Why)
 		}
 	}
@@ -146,6 +152,9 @@ func printJobs(files []*workflows.File, choices []*workflows.Job, m workflows.Ma
 	takes := ""
 	if len(m.Linux) > 0 {
 		takes = ", and Linux " + strings.Join(m.Linux, "/") + " in containers"
+		if m.X64AsARM && !slices.Contains(m.Linux, route.X64) {
+			takes += ", x64 jobs as arm64"
+		}
 	} else if m.OS == "darwin" {
 		takes = "; no container runtime, so no Linux jobs"
 	}
@@ -165,6 +174,9 @@ func printJobs(files []*workflows.File, choices []*workflows.Job, m workflows.Ma
 				note = "skip: " + j.Skip
 			case j.Fit == workflows.FitGood:
 				note = "recommended, via " + j.Var
+				if j.Why != "" {
+					note += "; " + j.Why
+				}
 			case j.Fit == workflows.FitNo:
 				note = "can't run here: " + j.Why
 			default:

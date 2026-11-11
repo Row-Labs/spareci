@@ -13,7 +13,30 @@ var (
 	macLinux = Machine{OS: "darwin", Arch: "arm64", Labels: mac.Labels, Linux: []string{"arm64", "x64"}}
 	macARM   = Machine{OS: "darwin", Arch: "arm64", Labels: mac.Labels, Linux: []string{"arm64"}}
 	linux    = Machine{OS: "linux", Arch: "amd64", Labels: []string{"self-hosted", "Linux", "X64", "spareci"}}
+	// spareci's default on arm64: Linux x64 jobs run as arm64.
+	macARMx64   = Machine{OS: "darwin", Arch: "arm64", Labels: mac.Labels, Linux: []string{"arm64"}, X64AsARM: true}
+	linuxARM    = Machine{OS: "linux", Arch: "arm64", Labels: []string{"self-hosted", "Linux", "ARM64", "spareci"}}
+	linuxARMx64 = Machine{OS: "linux", Arch: "arm64", Labels: linuxARM.Labels, X64AsARM: true}
 )
+
+func TestX64AsARMNote(t *testing.T) {
+	for _, m := range []Machine{macARMx64, linuxARMx64} {
+		j := parse(t, "jobs:\n  j:\n    runs-on: ubuntu-24.04\n", m).Jobs[0]
+		if j.Fit != FitGood || !strings.Contains(j.Why, "runs as arm64") {
+			t.Errorf("%s/%s: Fit %d, Why %q", m.OS, m.Arch, j.Fit, j.Why)
+		}
+		if j.Var != "SPARECI_RUNS_ON_LINUX" {
+			t.Errorf("%s/%s: Var %s, want SPARECI_RUNS_ON_LINUX", m.OS, m.Arch, j.Var)
+		}
+		if got := Recommended([]*File{{Jobs: []*Job{j}}}); len(got) != 1 {
+			t.Errorf("%s/%s: not recommended", m.OS, m.Arch)
+		}
+	}
+	// Opted out: an arm64-only Mac only maybe takes them.
+	if j := parse(t, "jobs:\n  j:\n    runs-on: ubuntu-24.04\n", macARM).Jobs[0]; j.Fit != FitMaybe {
+		t.Errorf("without X64AsARM: Fit %d", j.Fit)
+	}
+}
 
 func parse(t *testing.T, src string, m Machine) *File {
 	t.Helper()
@@ -225,6 +248,13 @@ func TestFit(t *testing.T) {
 		{"[self-hosted, Linux, ARM64]", macARM, FitGood},
 		{"[self-hosted, Linux, X64]", macARM, FitNo},
 		{"[self-hosted, Linux, macOS]", macLinux, FitNo},
+		// x64 Linux jobs on arm64 machines that run them as arm64.
+		{"ubuntu-24.04", macARMx64, FitGood},
+		{"ubuntu-latest", macARMx64, FitGood},
+		{"ubuntu-24.04", linuxARMx64, FitGood},
+		{"ubuntu-24.04", linuxARM, FitMaybe},
+		{"ubuntu-24.04", Machine{OS: "darwin", Arch: "arm64", Labels: mac.Labels, X64AsARM: true}, FitMaybe}, // no runtime
+		{"[self-hosted, Linux, X64]", macARMx64, FitNo},
 	}
 	for _, c := range cases {
 		f := parse(t, "jobs:\n  j:\n    runs-on: "+c.runsOn+"\n", c.m)

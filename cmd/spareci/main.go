@@ -35,7 +35,7 @@ Usage:
   spareci init      [--jobs workflow:job,...] [--all-compatible] [--dry-run]
                     opt this repo's workflow jobs in to spareci and open a PR
   spareci up        [--repo owner/name] [--label spareci] [--max 1] [--max-wait 10m]
-                    [--max-macos N] [--max-linux N] [--linux-x64-on-arm]
+                    [--max-macos N] [--max-linux N] [--linux-x64-on-arm=false]
                     [--dry-run] [--cache=true] [--cache-size 10GB]
                     [--job-home spareci|user|PATH] [--git-mirror=true]
                     [--only-on-ac] [--idle 10m] [--hours 18:00-08:00]
@@ -166,7 +166,7 @@ func upFlags(fs *flag.FlagSet) *upOpts {
 		maxN:      fs.Int("max", 1, "concurrent jobs, of every kind"),
 		maxMacOS:  fs.Int("max-macos", 0, "concurrent macOS jobs (0: up to --max)"),
 		maxLinux:  fs.Int("max-linux", 0, "concurrent Linux jobs (0: up to --max)"),
-		x64OnARM:  fs.Bool("linux-x64-on-arm", false, "run Linux x64 jobs (SPARECI_RUNS_ON_LINUX) in arm64 containers when there's no x64 backend"),
+		x64OnARM:  fs.Bool("linux-x64-on-arm", true, "on an arm64 machine, run Linux x64 jobs (SPARECI_RUNS_ON_LINUX, ubuntu-24.04) as arm64; =false runs them as x64 (in containers under Rosetta on a Mac)"),
 		maxWait:   fs.Duration("max-wait", 10*time.Minute, "send a job queued here longer than this to GitHub-hosted runners (0 to never)"),
 		interval:  fs.Duration("interval", 5*time.Second, "poll interval"),
 		dry:       fs.Bool("dry-run", false, "log the jobs we would take; register nothing"),

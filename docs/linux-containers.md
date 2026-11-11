@@ -78,7 +78,7 @@ Rosetta costs about 6x on compiler-heavy work like this. GitHub's whole `build` 
 
 **Live**, `spareci up --repo Row-Labs/spareci --max 3` on the same Mac (2026-11-11), dispatching `ci.yml` on main. Each pass ran twice: the first run with an empty tool cache volume and no `setup-go` cache for that architecture, the second warm. Times are GitHub's, from job start to end, in seconds. Hosted is the latest GitHub-hosted run of the same jobs (43100842127) and the range over 14 earlier ones.
 
-| Job | x64 (Rosetta), cold / warm | arm64 (`--linux-x64-on-arm`), cold / warm | Hosted `ubuntu-24.04` |
+| Job | x64 (Rosetta, `--linux-x64-on-arm=false`), cold / warm | arm64 (default), cold / warm | Hosted `ubuntu-24.04` |
 |---|---|---|---|
 | `build` | 108 / 37 | 33 / 14 | 21 (25–41) |
 | `cache-save` | 13 / 12 | 7 / 8 | 10 (5–10) |
@@ -88,7 +88,9 @@ Runs 43101146581 and 43101489980 (x64), 43101737090 and 43101874814 (arm64), all
 
 Where the time goes in the warm `build` (seconds; x64 / arm64 / hosted): setting up the job 5 / 3 / 1, `setup-go` 1 / 1 / 10 (hosted downloads its cache from GitHub), `go vet` 4 / 0 / 1, `go test` 11 / 3 / 4. A job here pays a few seconds more than hosted to start (container, runner copy, runner connection), which is why the short cache jobs are slightly slower, and gains on anything cached locally or compiled natively.
 
-**Recommendation.** Run jobs whose fallback is `ubuntu-24.04` (x64) on arm64 containers by default. Most CI (interpreted languages, Go, Rust, Node builds, tests) doesn't depend on the CPU architecture, and arm64 is several times faster here. Use x64 only for jobs that need it: prebuilt x64-only binaries, x64 artifacts built natively rather than cross-compiled, or tests of architecture-specific code. On Apple Silicon, `--linux-x64-on-arm` should be the default: warm arm64 beat GitHub-hosted on this repo's build (14s against 21s), while x64 under Rosetta took 37s, and 108s cold. Keep the x64 container for repos that opt out of `--linux-x64-on-arm`. Arch-sensitive jobs are better pinned to `ubuntu-24.04-arm`-style labels anyway.
+**Recommendation.** Run jobs whose fallback is `ubuntu-24.04` (x64) on arm64 containers by default. Most CI (interpreted languages, Go, Rust, Node builds, tests) doesn't depend on the CPU architecture, and arm64 is several times faster here. Use x64 only for jobs that need it: prebuilt x64-only binaries, x64 artifacts built natively rather than cross-compiled, or tests of architecture-specific code. This is the default: `--linux-x64-on-arm` is on, so an arm64 machine runs Linux x64 jobs as arm64. On a Mac that means only the arm64 container backend is made, and the x64 image isn't built. Warm arm64 beat GitHub-hosted on this repo's build (14s against 21s), while x64 under Rosetta took 37s, and 108s cold. `spareci init` recommends `ubuntu-*` jobs on such a machine with the note "runs as arm64 here".
+
+The cost is correctness for the jobs that do care. A job that downloads an x64-only binary fails with "exec format error". A job that builds a native x64 artifact and uploads or releases it produces an arm64 one instead. For those, either leave the job unconverted (it keeps running on GitHub's `ubuntu-24.04`), or opt the machine out with `--linux-x64-on-arm=false`. A Mac then builds the x64 image and runs those jobs under Rosetta: correct, but several times slower.
 
 ## Jobs that need Docker
 
