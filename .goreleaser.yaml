@@ -68,8 +68,8 @@ release:
     owner: Row-Labs
     name: spareci
 
-# `brew install row-labs/tap/spareci`. Pushes Casks/spareci.rb to
-# Row-Labs/homebrew-tap using the HOMEBREW_TAP_TOKEN secret.
+# `brew install row-labs/spareci/spareci`. Pushes Casks/spareci.rb to
+# Row-Labs/homebrew-spareci using the HOMEBREW_TAP_TOKEN secret.
 homebrew_casks:
   - name: spareci
     binaries: [spareci]
@@ -78,7 +78,7 @@ homebrew_casks:
     license: MIT
     repository:
       owner: Row-Labs
-      name: homebrew-tap
+      name: homebrew-spareci
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     commit_author:
       name: spareci-release
