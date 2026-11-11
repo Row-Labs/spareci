@@ -52,9 +52,10 @@ Requires macOS or Linux (arm64 or x64), the [`gh` CLI](https://cli.github.com) l
 
 > These commands work once the repo is public. Until then, build from a clone (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
-Homebrew (macOS and Linux):
+Homebrew (macOS and Linux). Homebrew only loads casks from taps you've trusted, so trust the spareci tap first:
 
 ```sh
+brew trust row-labs/spareci
 brew install row-labs/spareci/spareci
 ```
 
