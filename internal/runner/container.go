@@ -182,6 +182,28 @@ func ImageTag(version, arch string) string {
 	return fmt.Sprintf("spareci-runner:%s-%s-%s", version, arch, hex.EncodeToString(h.Sum(nil))[:12])
 }
 
+// CheckRuntime reports whether a Docker-API runtime that runs Linux
+// containers answers, as an error wrapping ErrNoRuntime if not. It is the
+// cheap first step of Prepare, for callers that only need to know.
+func CheckRuntime(ctx context.Context, d Docker) error {
+	if d == nil {
+		d = DockerCLI{}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	out, err := d.Output(ctx, nil, "version", "--format", "{{.Server.Os}}")
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return fmt.Errorf("%w: docker CLI not found", ErrNoRuntime)
+		}
+		return fmt.Errorf("%w: %v", ErrNoRuntime, err)
+	}
+	if osName := strings.TrimSpace(string(out)); osName != "linux" {
+		return fmt.Errorf("%w: the docker daemon runs %q containers, not linux", ErrNoRuntime, osName)
+	}
+	return nil
+}
+
 // Prepare checks the runtime and builds the image if this version of it isn't
 // there yet. An error wrapping ErrNoRuntime means there is no usable runtime:
 // the machine should take no Linux jobs, rather than fail them. buildLog
@@ -201,17 +223,8 @@ func (c *Container) Prepare(ctx context.Context, buildLog io.Writer) error {
 		return fmt.Errorf("container docker mode %q: want %q or %q", c.DockerMode, DockerSocket, DockerNone)
 	}
 	d := c.docker()
-	pctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	out, err := d.Output(pctx, nil, "version", "--format", "{{.Server.Os}}")
-	cancel()
-	if err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
-			return fmt.Errorf("%w: docker CLI not found", ErrNoRuntime)
-		}
-		return fmt.Errorf("%w: %v", ErrNoRuntime, err)
-	}
-	if osName := strings.TrimSpace(string(out)); osName != "linux" {
-		return fmt.Errorf("%w: the docker daemon runs %q containers, not linux", ErrNoRuntime, osName)
+	if err := CheckRuntime(ctx, d); err != nil {
+		return err
 	}
 	if c.DockerMode == DockerSocket {
 		c.socket = daemonSocket(runtime.GOOS, os.Getenv("DOCKER_HOST"), func() string { return DockerHost(os.Environ()) })

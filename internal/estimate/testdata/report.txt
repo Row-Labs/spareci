@@ -17,6 +17,7 @@ This machine (macOS ARM64) could take 17 of those minutes: ≈ $1.45/month saved
 
 GitHub list prices, checked 2026-11-10: https://docs.github.com/en/billing/reference/actions-runner-pricing
 - List prices. Your plan's included usage ($12/mo Free, $18 Pro and Team, $300 Enterprise Cloud) comes off the bill first, so a small bill may already be $0.
-- 19 min need another OS (macOS jobs need a Mac; spareci doesn't run Windows jobs).
+- 16 min are Linux jobs this Mac could take in containers with a container runtime (OrbStack, Docker Desktop or Colima) running; they aren't counted.
+- 3 min need another OS (macOS jobs need a Mac; spareci doesn't run Windows jobs).
 - 5 min ran on larger runners whose size their name doesn't give; they aren't priced.
 - One machine runs jobs one or a few at a time, so moving them can make CI slower when many run at once.

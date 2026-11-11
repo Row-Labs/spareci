@@ -17,6 +17,9 @@ type Record struct {
 	Repo   string `json:"repo"`
 	Public bool   `json:"public,omitempty"` // standard runners are free in public repos
 	Runner string `json:"runner"`           // the spareci runner that took it
+	// Backend ran it: macos-arm64 natively, linux-arm64 in a container, ...
+	// Empty in records from spareci 0.1, which ran every job natively.
+	Backend string `json:"backend,omitempty"`
 
 	RunID        int64  `json:"run_id,omitempty"`
 	RunAttempt   int    `json:"run_attempt,omitempty"`

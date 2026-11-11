@@ -53,14 +53,17 @@ type Unpriced struct {
 
 // Report is spareci stats.
 type Report struct {
-	Now      time.Time  `json:"now"`
-	Since    time.Time  `json:"since,omitzero"` // the first recorded job
-	Week     Period     `json:"this_week"`
-	Month    Period     `json:"this_month"`
-	AllTime  Period     `json:"all_time"`
-	ByRepo   []Line     `json:"by_repo"`
-	ByRunner []Line     `json:"by_runner"`
-	Unpriced []Unpriced `json:"unpriced"`
+	Now      time.Time `json:"now"`
+	Since    time.Time `json:"since,omitzero"` // the first recorded job
+	Week     Period    `json:"this_week"`
+	Month    Period    `json:"this_month"`
+	AllTime  Period    `json:"all_time"`
+	ByRepo   []Line    `json:"by_repo"`
+	ByRunner []Line    `json:"by_runner"`
+	// ByBackend is where the jobs ran: macos-arm64 natively, linux-arm64 in
+	// a container, ... Jobs recorded before spareci had backends are native.
+	ByBackend []Line     `json:"by_backend"`
+	Unpriced  []Unpriced `json:"unpriced"`
 	// Skipped is lines of the stats file that didn't parse.
 	Skipped int `json:"skipped_lines,omitempty"`
 
@@ -117,7 +120,7 @@ func Build(recs []Record, skipped int, now time.Time) Report {
 		PricesChecked: estimate.PricesChecked,
 		PricesSource:  estimate.PricesSource,
 	}
-	repos, runners := map[string]*Line{}, map[string]*Line{}
+	repos, runners, backends := map[string]*Line{}, map[string]*Line{}, map[string]*Line{}
 	for _, r := range recs {
 		if rep.Since.IsZero() || r.Ended.Before(rep.Since) {
 			rep.Since = r.Ended
@@ -136,8 +139,10 @@ func Build(recs []Record, skipped int, now time.Time) Report {
 		}
 		line(repos, r.Repo, r.Repo, "", p)
 		line(runners, p.Runner.SKU, p.Runner.Name, p.Runner.SKU, p)
+		b := cmp.Or(r.Backend, "native")
+		line(backends, b, b, "", p)
 	}
-	rep.ByRepo, rep.ByRunner = sorted(repos), sorted(runners)
+	rep.ByRepo, rep.ByRunner, rep.ByBackend = sorted(repos), sorted(runners), sorted(backends)
 	for _, per := range []*Period{&rep.Week, &rep.Month, &rep.AllTime} {
 		per.Saved = cents4(per.Saved)
 	}
@@ -181,7 +186,7 @@ func (r Report) Text(w io.Writer) {
 		money(r.AllTime.Saved), estimate.FmtInt(r.AllTime.Jobs), estimate.FmtInt(r.AllTime.Minutes), r.Since.In(r.Now.Location()).Format("Jan 2, 2006"))
 
 	width := 20
-	for _, l := range append(append([]Line{}, r.ByRepo...), r.ByRunner...) {
+	for _, l := range slices.Concat(r.ByRepo, r.ByRunner, r.ByBackend) {
 		width = max(width, len([]rune(l.Name)))
 	}
 	row := func(cols ...string) {
@@ -209,6 +214,14 @@ func (r Report) Text(w io.Writer) {
 		totals(l.Name, l.Totals, l.FreeMinutes == l.Minutes && l.Minutes > 0)
 	}
 	fmt.Fprintln(w)
+	// Only worth a section once this machine runs more than one kind.
+	if len(r.ByBackend) > 1 {
+		row("RAN ON", "", "", "")
+		for _, l := range r.ByBackend {
+			totals(l.Name, l.Totals, l.FreeMinutes == l.Minutes && l.Minutes > 0)
+		}
+		fmt.Fprintln(w)
+	}
 	if n := len(r.Unpriced); n > 0 {
 		mins := 0
 		for _, u := range r.Unpriced {

@@ -25,6 +25,7 @@ type API interface {
 // Finished is what the runner saw of a job on this machine.
 type Finished struct {
 	Runner     string // runner name, which GitHub reports on the job
+	Backend    string // which of the pool's backends ran it, e.g. linux-arm64
 	Job        string // job name the runner printed
 	Conclusion string // the runner's: Succeeded, Failed, Canceled
 	Started    time.Time
@@ -113,7 +114,7 @@ func (r *Recorder) Done(ctx context.Context, f Finished) (Record, error) {
 	delete(r.pending, f.Runner)
 	r.mu.Unlock()
 
-	rec := Record{Repo: r.Repo, Runner: f.Runner, Job: f.Job, Started: f.Started, Ended: f.Ended, Conclusion: f.Conclusion}
+	rec := Record{Repo: r.Repo, Runner: f.Runner, Backend: f.Backend, Job: f.Job, Started: f.Started, Ended: f.Ended, Conclusion: f.Conclusion}
 	rec.Public = r.isPublic(ctx)
 	job, err := l.job, l.err
 	if err != nil {

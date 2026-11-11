@@ -19,6 +19,20 @@ func Recommended(files []*File) []*Job {
 	return out
 }
 
+// Upgradable returns the jobs routed by the old shared variable
+// (SPARECI_RUNS_ON) that can move to their per-OS variable.
+func Upgradable(files []*File) []*Job {
+	var out []*Job
+	for _, f := range files {
+		for _, j := range f.Jobs {
+			if j.Upgrade {
+				out = append(out, j)
+			}
+		}
+	}
+	return out
+}
+
 // Convertible returns the jobs that can be chosen: not skipped, and not ones
 // this machine can't run.
 func Convertible(files []*File) []*Job {

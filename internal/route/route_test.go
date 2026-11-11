@@ -22,7 +22,7 @@ type fake struct {
 	calls   []string
 	stuck   bool   // ignore normal cancel, like a run held by a dead runner
 	skip    string // a job a failed-jobs re-run leaves out, as GitHub once did
-	routing string // value of SPARECI_RUNS_ON when the re-run was created
+	routing string // routing variables set when the re-run was created
 	clock   time.Time
 }
 
@@ -98,7 +98,10 @@ func (f *fake) rerun(kind string) error {
 		return errors.New("run not completed")
 	}
 	f.log(kind)
-	f.routing = f.vars["SPARECI_RUNS_ON"]
+	f.routing = ""
+	for _, v := range Vars(DefaultBase) {
+		f.routing += f.vars[v]
+	}
 	f.run.RunAttempt++
 	f.run.Status = "queued"
 	f.run.RunStartedAt = f.tick()
@@ -117,7 +120,7 @@ func (f *fake) RerunFailedJobs(context.Context, string, int64) error { return f.
 func (f *fake) RerunRun(context.Context, string, int64) error        { return f.rerun("rerun-all") }
 
 func router(f *fake) *Router {
-	return &Router{API: f, Repo: "o/r", Var: "SPARECI_RUNS_ON", Value: "spareci", HeartbeatVar: "SPARECI_HEARTBEAT", Poll: time.Millisecond}
+	return &Router{API: f, Repo: "o/r", Routes: []Route{{"SPARECI_RUNS_ON", "spareci"}}, HeartbeatVar: "SPARECI_HEARTBEAT", Poll: time.Millisecond}
 }
 
 func TestStartStop(t *testing.T) {
@@ -300,14 +303,19 @@ func TestLateFiringIsCoveredWhileAlive(t *testing.T) {
 }
 
 func TestWatchdogWorkflow(t *testing.T) {
-	w := Watchdog("SPARECI_RUNS_ON", "SPARECI_HEARTBEAT")
+	w := Watchdog(Vars(DefaultBase), "SPARECI_HEARTBEAT")
 	for _, m := range Slots() {
 		if !strings.Contains(w, fmt.Sprintf("- cron: '%s'", Cron(m))) {
 			t.Errorf("missing cron for minute %d", m)
 		}
 	}
 	for _, want := range []string{
-		"if: vars.SPARECI_RUNS_ON && !contains(vars.SPARECI_HEARTBEAT, format('|{0}|', github.event.schedule))",
+		"if: (vars.SPARECI_RUNS_ON_MACOS || vars.SPARECI_RUNS_ON_LINUX || vars.SPARECI_RUNS_ON_LINUX_ARM || vars.SPARECI_RUNS_ON) && !contains(vars.SPARECI_HEARTBEAT, format('|{0}|', github.event.schedule))",
+		"SPARECI_RUNS_ON_LINUX_ARM: ${{ vars.SPARECI_RUNS_ON_LINUX_ARM }}",
+		`if [ -n "$SPARECI_RUNS_ON_MACOS" ]; then`,
+		"actions/variables/SPARECI_RUNS_ON_MACOS",
+		"actions/variables/SPARECI_RUNS_ON_LINUX\"",
+		"actions/variables/SPARECI_RUNS_ON_LINUX_ARM",
 		"VAR_TOKEN: ${{ steps.app.outputs.token || secrets.SPARECI_TOKEN }}",
 		"uses: actions/create-github-app-token@v3",
 		"client-id: ${{ secrets.SPARECI_APP_CLIENT_ID }}",
@@ -348,4 +356,98 @@ func contains(s []string, v string) bool {
 		}
 	}
 	return false
+}
+
+func multiRouter(f *fake) *Router {
+	r := router(f)
+	r.Routes = Routes(DefaultBase, DefaultPrefix, []Target{TargetMacOS, TargetLinux}, true)
+	return r
+}
+
+func TestStartStopEveryRoute(t *testing.T) {
+	f := newFake()
+	r := multiRouter(f)
+	if err := r.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"SPARECI_RUNS_ON_MACOS": "spareci-macos", "SPARECI_RUNS_ON_LINUX": "spareci-linux", "SPARECI_RUNS_ON": "spareci"}
+	for k, v := range want {
+		if f.vars[k] != v {
+			t.Errorf("%s = %q, want %q", k, f.vars[k], v)
+		}
+	}
+	if _, ok := f.vars["SPARECI_RUNS_ON_LINUX_ARM"]; ok {
+		t.Error("set the arm64 Linux variable without an arm64 Linux backend")
+	}
+	if err := r.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.vars) != 0 {
+		t.Fatalf("after Stop: %v", f.vars)
+	}
+}
+
+func TestRescueClearsEveryRouteForTheReRun(t *testing.T) {
+	f := newFake()
+	f.jobs = []gh.Job{
+		{Name: "mac", Status: "queued", Labels: []string{"spareci-macos"}},
+		{Name: "linux", Status: "queued", Labels: []string{"spareci-linux"}},
+	}
+	r := multiRouter(f)
+	_ = r.Start(context.Background())
+	if err := r.Rescue(context.Background(), 7, false); err != nil {
+		t.Fatal(err)
+	}
+	if f.routing != "" {
+		t.Errorf("re-run created with routing %q set; want every variable cleared", f.routing)
+	}
+	if f.vars["SPARECI_RUNS_ON_LINUX"] != "spareci-linux" || f.vars["SPARECI_RUNS_ON_MACOS"] != "spareci-macos" {
+		t.Errorf("routing not restored after rescue: %v", f.vars)
+	}
+}
+
+func TestRescueWholeRunWhenALinuxJobRanHere(t *testing.T) {
+	f := newFake()
+	f.jobs = []gh.Job{
+		{Name: "build", Status: "completed", Conclusion: "success", Labels: []string{"spareci-linux"}},
+		{Name: "test", Status: "queued", Labels: []string{"spareci-macos"}},
+	}
+	r := multiRouter(f)
+	_ = r.Start(context.Background())
+	if err := r.Rescue(context.Background(), 7, false); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(f.calls, "rerun-all") {
+		t.Errorf("calls %v: want the whole run re-run", f.calls)
+	}
+}
+
+func TestNames(t *testing.T) {
+	for _, c := range []struct {
+		labels []string
+		want   Target
+		ok     bool
+	}{
+		{[]string{"macos-15"}, TargetMacOS, true},
+		{[]string{"macos-13"}, TargetMacOS, true},
+		{[]string{"ubuntu-24.04"}, TargetLinux, true},
+		{[]string{"ubuntu-latest"}, TargetLinux, true},
+		{[]string{"ubuntu-24.04-arm"}, TargetLinuxARM, true},
+		{[]string{"self-hosted", "Linux", "ARM64"}, TargetLinuxARM, true},
+		{[]string{"self-hosted", "linux"}, TargetLinux, true},
+		{[]string{"self-hosted", "macOS"}, TargetMacOS, true},
+		{[]string{"windows-latest"}, Target{}, false},
+		{[]string{"my-big-runner"}, Target{}, false},
+	} {
+		got, ok := TargetFor(c.labels)
+		if got != c.want || ok != c.ok {
+			t.Errorf("TargetFor(%v) = %v, %v; want %v, %v", c.labels, got, ok, c.want, c.ok)
+		}
+	}
+	if v, l := TargetLinuxARM.Var("SPARECI_RUNS_ON"), TargetLinuxARM.Label("spareci"); v != "SPARECI_RUNS_ON_LINUX_ARM" || l != "spareci-linux-arm" {
+		t.Errorf("arm64 Linux: %s %s", v, l)
+	}
+	if got := Routes("", "spareci", Targets, true); got != nil {
+		t.Errorf("empty base routes %v", got)
+	}
 }

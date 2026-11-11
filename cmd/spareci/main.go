@@ -35,6 +35,7 @@ Usage:
   spareci init      [--jobs workflow:job,...] [--all-compatible] [--dry-run]
                     opt this repo's workflow jobs in to spareci and open a PR
   spareci up        [--repo owner/name] [--label spareci] [--max 1] [--max-wait 10m]
+                    [--max-macos N] [--max-linux N] [--linux-x64-on-arm]
                     [--dry-run] [--cache=true] [--cache-size 10GB]
                     [--job-home spareci|user|PATH] [--git-mirror=true]
                     [--only-on-ac] [--idle 10m] [--hours 18:00-08:00]
@@ -51,9 +52,15 @@ Usage:
   spareci version
 
 In your workflow (spareci init does this), route jobs here when spareci is up,
-and to GitHub otherwise:
+and to GitHub otherwise, with the variable for the job's OS:
 
-  runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }}
+  runs-on: ${{ vars.SPARECI_RUNS_ON_MACOS || 'macos-15' }}
+  runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-24.04' }}
+  runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX_ARM || 'ubuntu-24.04-arm' }}
+
+spareci up sets each one while this machine can run that kind of job.
+SPARECI_RUNS_ON, from spareci 0.1, still routes to this machine's own OS;
+spareci init upgrades it.
 `
 
 func main() {
@@ -109,14 +116,15 @@ type common struct {
 func commonFlags(fs *flag.FlagSet) *common {
 	c := &common{}
 	fs.StringVar(&c.repo, "repo", "", "owner/name (default: the repo in the current directory)")
-	fs.StringVar(&c.label, "label", "spareci", "label that routes a job to this machine")
-	fs.StringVar(&c.vname, "fallback-var", "SPARECI_RUNS_ON", "repo variable set to --label while up (empty to disable)")
+	fs.StringVar(&c.label, "label", route.DefaultPrefix, "routing label prefix: jobs routed here carry <label>-macos, <label>-linux, ... (or <label> from SPARECI_RUNS_ON)")
+	fs.StringVar(&c.vname, "fallback-var", route.DefaultBase, "base name of the routing variables: <name>_MACOS, <name>_LINUX, <name>_LINUX_ARM and <name> itself (empty to disable routing)")
 	fs.StringVar(&c.hname, "heartbeat-var", "SPARECI_HEARTBEAT", "repo variable refreshed while up, read by the watchdog workflow (empty to disable)")
 	return c
 }
 
-func (c *common) router(client *gh.Client) *route.Router {
-	return &route.Router{API: client, Repo: c.repo, Var: c.vname, Value: c.label, HeartbeatVar: c.hname}
+// router routes the given kinds of jobs here, plus the old shared variable.
+func (c *common) router(client *gh.Client, targets []route.Target) *route.Router {
+	return &route.Router{API: client, Repo: c.repo, Routes: route.Routes(c.vname, c.label, targets, true), HeartbeatVar: c.hname}
 }
 
 func (c *common) resolve() error {
@@ -134,6 +142,9 @@ func (c *common) resolve() error {
 type upOpts struct {
 	*common
 	maxN      *int
+	maxMacOS  *int
+	maxLinux  *int
+	x64OnARM  *bool
 	maxWait   *time.Duration
 	interval  *time.Duration
 	dry       *bool
@@ -144,6 +155,7 @@ type upOpts struct {
 	upstream  *string
 	jobHome   *string
 	gitMirror *bool
+	linux     linuxOpts
 	laptop    *laptopOpts
 }
 
@@ -151,7 +163,10 @@ type upOpts struct {
 func upFlags(fs *flag.FlagSet) *upOpts {
 	return &upOpts{
 		common:    commonFlags(fs),
-		maxN:      fs.Int("max", 1, "concurrent jobs"),
+		maxN:      fs.Int("max", 1, "concurrent jobs, of every kind"),
+		maxMacOS:  fs.Int("max-macos", 0, "concurrent macOS jobs (0: up to --max)"),
+		maxLinux:  fs.Int("max-linux", 0, "concurrent Linux jobs (0: up to --max)"),
+		x64OnARM:  fs.Bool("linux-x64-on-arm", false, "run Linux x64 jobs (SPARECI_RUNS_ON_LINUX) in arm64 containers when there's no x64 backend"),
 		maxWait:   fs.Duration("max-wait", 10*time.Minute, "send a job queued here longer than this to GitHub-hosted runners (0 to never)"),
 		interval:  fs.Duration("interval", 5*time.Second, "poll interval"),
 		dry:       fs.Bool("dry-run", false, "log the jobs we would take; register nothing"),
@@ -162,7 +177,12 @@ func upFlags(fs *flag.FlagSet) *upOpts {
 		upstream:  fs.String("cache-upstream", cache.DefaultUpstream, "GitHub results service, for calls the local cache passes through (artifacts)"),
 		jobHome:   fs.String("job-home", runner.HomeSpareci, `HOME for jobs: "spareci" (a separate home per repo), "user" (your own home and environment), or a path`),
 		gitMirror: fs.Bool("git-mirror", true, "keep a local mirror of the repo so checkouts fetch only new objects (needs a separate --job-home)"),
-		laptop:    laptopFlags(fs),
+		linux: linuxOpts{
+			cpus:   fs.String("linux-cpus", "", `CPUs per Linux job container, as docker run --cpus takes them ("4"; default: no limit)`),
+			memory: fs.String("linux-memory", "", `memory per Linux job container, as docker run --memory takes it ("16g"; default: no limit)`),
+			docker: fs.String("linux-docker", runner.DockerSocket, `docker for Linux jobs: "socket" (the runtime's socket; jobs control it, no isolation) or "none"`),
+		},
+		laptop: laptopFlags(fs),
 	}
 }
 
@@ -239,20 +259,30 @@ func up(args []string) error {
 		}
 	}
 
-	labels := append(runner.DefaultLabels(), c.label)
-	slog.Info("spareci up", "repo", c.repo, "labels", labels, "max", *maxN, "runner", host.Version, "dir", host.Root, "job_home", cmp.Or(host.JobHome, "user"), "local_cache", cacheSrv != nil, "git_mirror", host.Git != nil, "dry_run", *dry)
+	all := append([]runner.Backend{host}, linuxBackends(soft, host, c.repo, *dry, *o.x64OnARM, o.linux)...)
+	backends, targets := pool.Assign(all, pool.Policy{
+		Prefix: c.label, X64OnARM: *o.x64OnARM, Legacy: true,
+		Max: map[string]int{runner.OSMacOS: *o.maxMacOS, runner.OSLinux: *o.maxLinux},
+	})
+	if len(backends) == 0 {
+		return fmt.Errorf("no backend can run jobs on %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	for _, b := range backends {
+		slog.Info("backend", "name", b.Name(), "labels", b.AllLabels(), "max", cmp.Or(b.Max, *maxN))
+	}
+	slog.Info("spareci up", "repo", c.repo, "max", *maxN, "runner", host.Version, "dir", host.Root, "job_home", cmp.Or(host.JobHome, "user"), "local_cache", cacheSrv != nil, "git_mirror", host.Git != nil, "dry_run", *dry)
 	p := pool.New(pool.Config{
 		Repo:     c.repo,
-		Labels:   labels,
+		Backends: backends,
 		Max:      *maxN,
 		Interval: *interval,
-		Router:   c.router(client),
+		Router:   c.router(client, targets),
 		MaxWait:  *maxWait,
 		DryRun:   *dry,
 		Cache:    cacheSrv,
 		Gate:     poolGate(g),
 		Stats:    recorder(*dry, client, c, host.Root),
-	}, client, host)
+	}, client)
 	if g != nil {
 		slog.Info("laptop mode: taking jobs only when conditions are met", "when", g.Config().String())
 		defer removeGateState(c.repo)
@@ -307,18 +337,17 @@ func down(args []string) error {
 	return routeBack(context.Background(), client, c)
 }
 
-// routeBack clears routing, sends jobs already queued here to GitHub-hosted
-// runners, and removes runner registrations left behind by a crash.
+// routeBack clears every routing variable, sends jobs routed to spareci and
+// still queued to GitHub-hosted runners, and removes runner registrations
+// left behind by a crash.
 func routeBack(ctx context.Context, client *gh.Client, c *common) error {
-	r := c.router(client)
-	if c.vname != "" {
+	r := c.router(client, route.Targets)
+	if r.Enabled() {
 		if err := r.Stop(ctx); err != nil {
 			return err
 		}
-		fmt.Printf("cleared %s: new jobs go to GitHub-hosted runners\n", c.vname)
-		labels := append(runner.DefaultLabels(), c.label)
-		match := func(j gh.Job) bool { return pool.Matches(labels, j) }
-		n, err := pool.RescueQueued(ctx, client, r, match)
+		fmt.Printf("cleared %s: new jobs go to GitHub-hosted runners\n", strings.Join(r.Vars(), ", "))
+		n, err := pool.RescueQueued(ctx, client, r, r.Routed)
 		if n > 0 {
 			fmt.Printf("re-ran %d run(s) whose jobs were queued for this machine\n", n)
 		}

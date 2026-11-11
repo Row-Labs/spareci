@@ -4,11 +4,12 @@ on:
   push:
   workflow_dispatch:
 
-# Every job runs on a machine running `spareci up` while one is up, and on
-# GitHub-hosted runners otherwise, so CI checks spareci both ways.
+# Every job runs on a machine running `spareci up` that takes Linux x64 jobs
+# while one is up (on a Mac, in a container), and on GitHub-hosted runners
+# otherwise, so CI checks spareci both ways.
 jobs:
   build:
-    runs-on: ${{ vars.SPARECI_RUNS_ON || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
@@ -25,7 +26,7 @@ jobs:
 
   # End to end through real actions: save in one job, restore in the next.
   cache-save:
-    runs-on: ${{ vars.SPARECI_RUNS_ON || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-24.04' }}
     steps:
       - name: Where the cache goes
         run: |
@@ -34,7 +35,7 @@ jobs:
       - name: Self-hosted jobs must use the local cache
         if: runner.environment == 'self-hosted'
         run: |
-          # 127.0.0.1 on the host; host.docker.internal from a Linux job container on a Mac.
+          # 127.0.0.1 natively; host.docker.internal from a container.
           case "$ACTIONS_RESULTS_URL" in http://127.0.0.1:*|http://host.docker.internal:*) ;; *) echo "::error::cache is not local"; exit 1;; esac
       - run: mkdir -p payload && head -c 20000000 /dev/urandom > payload/blob && shasum -a 256 payload/blob | tee payload.sha
       - uses: actions/cache/save@v4
@@ -51,7 +52,7 @@ jobs:
 
   cache-restore:
     needs: cache-save
-    runs-on: ${{ vars.SPARECI_RUNS_ON || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-24.04' }}
     steps:
       - uses: actions/download-artifact@v4
         with:
