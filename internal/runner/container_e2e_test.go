@@ -37,7 +37,7 @@ func TestContainerE2E(t *testing.T) {
 			// The tools the Dockerfile promises, as the runner user, with the
 			// docker socket passed through as Run does.
 			check := `set -e
-for t in git git-lfs curl wget jq unzip zip xz zstd make gcc g++ python3 pip3 sudo docker shasum rsync ssh tini; do command -v $t >/dev/null || { echo "missing $t"; exit 1; }; done
+for t in git git-lfs curl wget jq unzip zip xz zstd make gcc g++ python3 pip3 sudo docker shasum rsync ssh tini gh; do command -v $t >/dev/null || { echo "missing $t"; exit 1; }; done
 docker buildx version >/dev/null; docker compose version >/dev/null
 test "$(id -u)" = 1001
 sudo -n true
