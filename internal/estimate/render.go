@@ -48,8 +48,12 @@ func (r Report) Text(w io.Writer) {
 		fmt.Fprintln(w, "No jobs ran on GitHub-hosted runners in this window.")
 	} else {
 		fmt.Fprintf(w, "≈ %s/month on GitHub-hosted runners.\n", money(r.MonthlyCost))
-		fmt.Fprintf(w, "This machine (%s %s) could take %s of those minutes: ≈ %s/month saved.\n",
-			r.Host.OS, r.Host.Arch, fmtInt(r.FitMinutes), money(r.MonthlySaving))
+		what := r.Host.OS + " " + r.Host.Arch
+		if len(r.Host.Linux) > 0 {
+			what += ", Linux " + strings.Join(r.Host.Linux, "/") + " in containers"
+		}
+		fmt.Fprintf(w, "This machine (%s) could take %s of those minutes: ≈ %s/month saved.\n",
+			what, fmtInt(r.FitMinutes), money(r.MonthlySaving))
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "GitHub list prices, checked %s: %s\n", r.PricesChecked, r.PricesSource)

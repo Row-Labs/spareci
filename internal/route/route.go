@@ -1,7 +1,8 @@
 // Package route owns the repo variables that send jobs to this machine, and
 // sends jobs back to GitHub-hosted runners when this machine can't take them.
 //
-// Routing works through `runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }}`.
+// Routing works through `runs-on: ${{ vars.SPARECI_RUNS_ON_MACOS || 'macos-15' }}`,
+// one variable per kind of job (see names.go).
 // GitHub reads repo variables once per run attempt, when the attempt is
 // created, so:
 //   - Clearing the variable affects runs created afterwards, not jobs already
@@ -39,12 +40,17 @@ type API interface {
 // HeartbeatEvery is how often a running daemon refreshes its heartbeat.
 const HeartbeatEvery = time.Minute
 
+// Route is one routing variable and the label it's set to while up.
+type Route struct {
+	Var   string // e.g. SPARECI_RUNS_ON_LINUX
+	Label string // e.g. spareci-linux
+}
+
 type Router struct {
 	API          API
 	Repo         string
-	Var          string // routing variable, e.g. SPARECI_RUNS_ON; "" disables routing
-	Value        string // its value while up: the routing label
-	HeartbeatVar string // e.g. SPARECI_HEARTBEAT; "" disables the heartbeat
+	Routes       []Route // every variable this machine sets; none disables routing
+	HeartbeatVar string  // e.g. SPARECI_HEARTBEAT; "" disables the heartbeat
 
 	Poll       time.Duration // how often a rescue checks progress; default 3s
 	CancelWait time.Duration // how long a cancel may take before force-cancelling; default 1m
@@ -59,20 +65,72 @@ func (r *Router) Start(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.on = true
-	if r.Var == "" {
+	if len(r.Routes) == 0 {
 		return nil
 	}
-	if err := r.API.SetVariable(ctx, r.Repo, r.Var, r.Value); err != nil {
-		return fmt.Errorf("set routing variable %s: %w", r.Var, err)
+	if err := r.setLocked(ctx); err != nil {
+		return err
 	}
 	return r.beatLocked(ctx, time.Now())
+}
+
+// Enabled reports whether routing is configured at all.
+func (r *Router) Enabled() bool { return len(r.Routes) > 0 }
+
+// Vars names the routing variables, for logs.
+func (r *Router) Vars() []string {
+	var v []string
+	for _, rt := range r.Routes {
+		v = append(v, rt.Var)
+	}
+	return v
+}
+
+// Labels are the routing labels. A job carrying one was routed here.
+func (r *Router) Labels() []string {
+	var l []string
+	for _, rt := range r.Routes {
+		l = append(l, rt.Label)
+	}
+	return l
+}
+
+// Routed reports whether a job's runs-on came from one of our variables.
+func (r *Router) Routed(j gh.Job) bool {
+	for _, l := range j.Labels {
+		for _, rt := range r.Routes {
+			if strings.EqualFold(l, rt.Label) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (r *Router) setLocked(ctx context.Context) error {
+	for _, rt := range r.Routes {
+		if err := r.API.SetVariable(ctx, r.Repo, rt.Var, rt.Label); err != nil {
+			return fmt.Errorf("set routing variable %s: %w", rt.Var, err)
+		}
+	}
+	return nil
+}
+
+func (r *Router) clearLocked(ctx context.Context) error {
+	var err error
+	for _, rt := range r.Routes {
+		if e := r.API.DeleteVariable(ctx, r.Repo, rt.Var); e != nil {
+			err = errors.Join(err, fmt.Errorf("clear routing variable %s: %w", rt.Var, e))
+		}
+	}
+	return err
 }
 
 // Beat refreshes the heartbeat until ctx ends. It also re-asserts the routing
 // variable, which the watchdog clears if this machine looked dead (say, while
 // a laptop slept).
 func (r *Router) Beat(ctx context.Context) {
-	if r.Var == "" {
+	if len(r.Routes) == 0 {
 		return
 	}
 	t := time.NewTicker(HeartbeatEvery)
@@ -84,7 +142,7 @@ func (r *Router) Beat(ctx context.Context) {
 		case now := <-t.C:
 			r.mu.Lock()
 			if r.on {
-				err := r.API.SetVariable(ctx, r.Repo, r.Var, r.Value)
+				err := r.setLocked(ctx)
 				if err == nil {
 					err = r.beatLocked(ctx, now)
 				}
@@ -109,10 +167,10 @@ func (r *Router) Stop(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.on = false
-	if r.Var == "" {
+	if len(r.Routes) == 0 {
 		return nil
 	}
-	err := r.API.DeleteVariable(ctx, r.Repo, r.Var)
+	err := r.clearLocked(ctx)
 	if r.HeartbeatVar != "" {
 		err = errors.Join(err, r.API.DeleteVariable(ctx, r.Repo, r.HeartbeatVar))
 	}
@@ -176,17 +234,21 @@ func (r *Router) Rescue(ctx context.Context, runID int64, force bool) error {
 		return err
 	}
 
-	// The re-run must be created while the routing variable is cleared. Hold
-	// the lock so the heartbeat doesn't set it back in between. Runs created
+	// The re-run must be created while every routing variable is cleared: it
+	// reads all of them again, and a run can hold jobs of several kinds. Hold
+	// the lock so the heartbeat doesn't set them back in between. Runs created
 	// in this short window also go to GitHub, which is the safe direction.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cleared := false
-	if r.on && r.Var != "" {
-		if err := r.API.DeleteVariable(ctx, r.Repo, r.Var); err != nil {
+	if r.on && len(r.Routes) > 0 {
+		cleared = true
+		if err := r.clearLocked(ctx); err != nil {
+			if serr := r.setLocked(context.WithoutCancel(ctx)); serr != nil {
+				err = errors.Join(err, fmt.Errorf("restore routing: %w", serr))
+			}
 			return fmt.Errorf("clear routing for re-run: %w", err)
 		}
-		cleared = true
 	}
 	if whole {
 		err = r.API.RerunRun(ctx, r.Repo, runID)
@@ -214,7 +276,7 @@ func (r *Router) Rescue(ctx context.Context, runID int64, force bool) error {
 		}
 	}
 	if cleared {
-		if serr := r.API.SetVariable(context.WithoutCancel(ctx), r.Repo, r.Var, r.Value); serr != nil {
+		if serr := r.setLocked(context.WithoutCancel(ctx)); serr != nil {
 			err = errors.Join(err, fmt.Errorf("restore routing: %w", serr))
 		}
 	}
@@ -225,14 +287,7 @@ func (r *Router) Rescue(ctx context.Context, runID int64, force bool) error {
 }
 
 // ranHere reports whether a job was routed to this machine.
-func (r *Router) ranHere(j gh.Job) bool {
-	for _, l := range j.Labels {
-		if r.Value != "" && strings.EqualFold(l, r.Value) {
-			return true
-		}
-	}
-	return false
-}
+func (r *Router) ranHere(j gh.Job) bool { return r.Routed(j) }
 
 // cancel cancels a run and waits for it to complete, force-cancelling it if
 // a normal cancel doesn't finish in time.

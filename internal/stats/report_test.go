@@ -173,3 +173,45 @@ func TestAppendLoad(t *testing.T) {
 		t.Errorf("Load = %+v, %d, %v", recs, bad, err)
 	}
 }
+
+func TestByBackend(t *testing.T) {
+	recs := fixtureRecords()
+	for i := range recs {
+		if len(recs[i].Fallback) > 0 && recs[i].Fallback[0] == "ubuntu-24.04" {
+			recs[i].Backend = "linux-arm64"
+		}
+	}
+	recs[0].Backend = "macos-arm64" // the rest are from 0.1: native
+	r := Build(recs, 0, now)
+	got := map[string]int{}
+	for _, l := range r.ByBackend {
+		got[l.Name] = l.Jobs
+	}
+	if got["linux-arm64"] != 2 || got["macos-arm64"] != 1 || got["native"] != 3 || len(got) != 3 {
+		t.Errorf("by backend %v", got)
+	}
+	var buf bytes.Buffer
+	r.Text(&buf)
+	if !strings.Contains(buf.String(), "RAN ON") || !strings.Contains(buf.String(), "linux-arm64") {
+		t.Errorf("text has no backend section:\n%s", buf.String())
+	}
+	// One backend: no section.
+	buf.Reset()
+	Build(fixtureRecords(), 0, now).Text(&buf)
+	if strings.Contains(buf.String(), "RAN ON") {
+		t.Error("backend section with only one backend")
+	}
+}
+
+func TestRecordKeepsBackend(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.jsonl")
+	r := rec("acme/app", "build", now, time.Minute, "ubuntu-24.04")
+	r.Backend = "linux-x64"
+	if err := Append(path, r); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := Load(path)
+	if err != nil || len(got) != 1 || got[0].Backend != "linux-x64" {
+		t.Fatalf("loaded %+v, %v", got, err)
+	}
+}

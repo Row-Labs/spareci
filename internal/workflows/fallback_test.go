@@ -23,6 +23,10 @@ func TestFallback(t *testing.T) {
 		{`${{ vars.SPARECI_RUNS_ON }}`, nil, "isn't in the form"},
 		{`macos-15`, nil, "has no vars.SPARECI_RUNS_ON"},
 		{`${{ vars.SPARECI_RUNS_ON || fromJSON('[]') }}`, nil, "isn't a label"},
+		{`${{ vars.SPARECI_RUNS_ON_MACOS || 'macos-15' }}`, []string{"macos-15"}, ""},
+		{`${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-24.04' }}`, []string{"ubuntu-24.04"}, ""},
+		{`${{ vars.SPARECI_RUNS_ON_LINUX_ARM || 'ubuntu-24.04-arm' }}`, []string{"ubuntu-24.04-arm"}, ""},
+		{`${{ vars.SPARECI_RUNS_ON_WINDOWS || 'windows-2025' }}`, nil, "isn't in the form"},
 	}
 	for _, c := range cases {
 		got, err := Fallback(c.runsOn, DefaultVar)

@@ -8,8 +8,11 @@ import (
 )
 
 var (
-	mac   = Machine{OS: "darwin", Arch: "arm64", Labels: []string{"self-hosted", "macOS", "ARM64", "spareci"}}
-	linux = Machine{OS: "linux", Arch: "amd64", Labels: []string{"self-hosted", "Linux", "X64", "spareci"}}
+	mac = Machine{OS: "darwin", Arch: "arm64", Labels: []string{"self-hosted", "macOS", "ARM64", "spareci"}}
+	// A Mac with a container runtime, taking arm64 Linux jobs and x64 ones.
+	macLinux = Machine{OS: "darwin", Arch: "arm64", Labels: mac.Labels, Linux: []string{"arm64", "x64"}}
+	macARM   = Machine{OS: "darwin", Arch: "arm64", Labels: mac.Labels, Linux: []string{"arm64"}}
+	linux    = Machine{OS: "linux", Arch: "amd64", Labels: []string{"self-hosted", "Linux", "X64", "spareci"}}
 )
 
 func parse(t *testing.T, src string, m Machine) *File {
@@ -45,51 +48,51 @@ func TestRewrite(t *testing.T) {
 		{
 			name: "plain",
 			in:   "jobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps: []\n",
-			want: "jobs:\n  build:\n    runs-on: ${{ vars.SPARECI_RUNS_ON || 'ubuntu-24.04' }}\n    steps: []\n",
+			want: "jobs:\n  build:\n    runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-24.04' }}\n    steps: []\n",
 		},
 		{
 			name: "trailing comment kept",
 			in:   "jobs:\n  build:\n    runs-on: macos-15   # 10x minutes\n",
-			want: "jobs:\n  build:\n    runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }}   # 10x minutes\n",
+			want: "jobs:\n  build:\n    runs-on: ${{ vars.SPARECI_RUNS_ON_MACOS || 'macos-15' }}   # 10x minutes\n",
 		},
 		{
 			name: "double quoted stays quoted",
 			in:   "jobs:\n  build:\n    runs-on: \"ubuntu-latest\"\n",
-			want: "jobs:\n  build:\n    runs-on: \"${{ vars.SPARECI_RUNS_ON || 'ubuntu-latest' }}\"\n",
+			want: "jobs:\n  build:\n    runs-on: \"${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-latest' }}\"\n",
 		},
 		{
 			name: "single quoted",
 			in:   "jobs:\n  build:\n    runs-on: 'ubuntu-latest' # hi\n",
-			want: "jobs:\n  build:\n    runs-on: ${{ vars.SPARECI_RUNS_ON || 'ubuntu-latest' }} # hi\n",
+			want: "jobs:\n  build:\n    runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-latest' }} # hi\n",
 		},
 		{
 			name: "one-item flow list",
 			in:   "jobs:\n  build:\n    runs-on: [ubuntu-latest]\n",
-			want: "jobs:\n  build:\n    runs-on: ${{ vars.SPARECI_RUNS_ON || 'ubuntu-latest' }}\n",
+			want: "jobs:\n  build:\n    runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-latest' }}\n",
 		},
 		{
 			name: "self-hosted flow list keeps every label",
 			in:   "jobs:\n  build:\n    runs-on: [self-hosted, macOS, ARM64]\n",
-			want: "jobs:\n  build:\n    runs-on: ${{ vars.SPARECI_RUNS_ON || fromJSON('[\"self-hosted\",\"macOS\",\"ARM64\"]') }}\n",
+			want: "jobs:\n  build:\n    runs-on: ${{ vars.SPARECI_RUNS_ON_MACOS || fromJSON('[\"self-hosted\",\"macOS\",\"ARM64\"]') }}\n",
 		},
 		{
 			name: "block list collapses to one line",
 			in:   "jobs:\n  build:\n    runs-on: # where\n      - self-hosted\n      - macOS\n    steps: []\n",
-			want: "jobs:\n  build:\n    runs-on: ${{ vars.SPARECI_RUNS_ON || fromJSON('[\"self-hosted\",\"macOS\"]') }} # where\n    steps: []\n",
+			want: "jobs:\n  build:\n    runs-on: ${{ vars.SPARECI_RUNS_ON_MACOS || fromJSON('[\"self-hosted\",\"macOS\"]') }} # where\n    steps: []\n",
 		},
 		{
 			name: "CRLF",
 			in:   "jobs:\r\n  build:\r\n    runs-on: ubuntu-24.04\r\n    steps: []\r\n",
-			want: "jobs:\r\n  build:\r\n    runs-on: ${{ vars.SPARECI_RUNS_ON || 'ubuntu-24.04' }}\r\n    steps: []\r\n",
+			want: "jobs:\r\n  build:\r\n    runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-24.04' }}\r\n    steps: []\r\n",
 		},
 		{
 			name: "label with a quote",
 			in:   "jobs:\n  build:\n    runs-on: \"it's-mine\"\n",
-			want: "jobs:\n  build:\n    runs-on: \"${{ vars.SPARECI_RUNS_ON || 'it''s-mine' }}\"\n",
+			want: "jobs:\n  build:\n    runs-on: \"${{ vars.SPARECI_RUNS_ON_MACOS || 'it''s-mine' }}\"\n",
 		},
 		{
 			name: "already converted",
-			in:   "jobs:\n  build:\n    runs-on: ${{ vars.SPARECI_RUNS_ON || 'ubuntu-24.04' }}\n",
+			in:   "jobs:\n  build:\n    runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-24.04' }}\n",
 			skip: "already routed",
 		},
 		{
@@ -175,10 +178,10 @@ func TestRewriteSeveral(t *testing.T) {
 `
 	want := `jobs:
   a:
-    runs-on: ${{ vars.SPARECI_RUNS_ON || fromJSON('["self-hosted","macOS"]') }}
+    runs-on: ${{ vars.SPARECI_RUNS_ON_MACOS || fromJSON('["self-hosted","macOS"]') }}
     steps: []
   b:
-    runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }}
+    runs-on: ${{ vars.SPARECI_RUNS_ON_MACOS || 'macos-15' }}
   c:
     runs-on: ubuntu-latest
 `
@@ -215,6 +218,13 @@ func TestFit(t *testing.T) {
 		{"macos-15", linux, FitNo},
 		{"[self-hosted, linux]", linux, FitGood},
 		{"[ubuntu-latest, macos-15]", linux, FitNo},
+		{"ubuntu-24.04", macLinux, FitGood},
+		{"ubuntu-24.04-arm", macLinux, FitGood},
+		{"ubuntu-24.04", macARM, FitMaybe},
+		{"ubuntu-24.04-arm", macARM, FitGood},
+		{"[self-hosted, Linux, ARM64]", macARM, FitGood},
+		{"[self-hosted, Linux, X64]", macARM, FitNo},
+		{"[self-hosted, Linux, macOS]", macLinux, FitNo},
 	}
 	for _, c := range cases {
 		f := parse(t, "jobs:\n  j:\n    runs-on: "+c.runsOn+"\n", c.m)
@@ -231,6 +241,9 @@ func TestFit(t *testing.T) {
 	src := "jobs:\n  j:\n    runs-on: ubuntu-latest\n    container: node:22\n"
 	if j := parse(t, src, mac).Jobs[0]; j.Fit != FitNo {
 		t.Errorf("container job on a Mac: Fit = %d", j.Fit)
+	}
+	if j := parse(t, src, macLinux).Jobs[0]; j.Fit != FitNo {
+		t.Errorf("container job on a Mac with containers: Fit = %d", j.Fit)
 	}
 	if j := parse(t, src, linux).Jobs[0]; j.Fit != FitGood {
 		t.Errorf("container job on Linux: Fit = %d (%s)", j.Fit, j.Why)
@@ -347,11 +360,11 @@ func TestAppWorkflows(t *testing.T) {
 	}
 	want := map[string][]string{
 		".github/workflows/ci.yml": {
-			"+    runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }}",
+			"+    runs-on: ${{ vars.SPARECI_RUNS_ON_MACOS || 'macos-15' }}",
 		},
 		".github/workflows/release.yml": {
-			"+    runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }} # needs Xcode",
-			"+    runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }}",
+			"+    runs-on: ${{ vars.SPARECI_RUNS_ON_MACOS || 'macos-15' }} # needs Xcode",
+			"+    runs-on: ${{ vars.SPARECI_RUNS_ON_MACOS || 'macos-15' }}",
 		},
 	}
 	if len(changes) != len(want) {
@@ -377,5 +390,90 @@ func TestAppWorkflows(t *testing.T) {
 	linux.Assess(files)
 	if got := names(Recommended(files)); got != "ci:changes,ci:checks,ci:tests,release:checks,release:build-linux,release:publish" {
 		t.Errorf("Recommended on Linux = %s", got)
+	}
+}
+
+// Each job gets the variable for the runner it falls back to.
+func TestRewriteVariablePerOS(t *testing.T) {
+	cases := []struct {
+		runsOn string
+		m      Machine
+		want   string
+	}{
+		{"macos-15", mac, "SPARECI_RUNS_ON_MACOS"},
+		{"ubuntu-24.04", mac, "SPARECI_RUNS_ON_LINUX"},
+		{"ubuntu-24.04-arm", mac, "SPARECI_RUNS_ON_LINUX_ARM"},
+		{"[self-hosted, Linux, ARM64]", linux, "SPARECI_RUNS_ON_LINUX_ARM"},
+		{"[self-hosted, Linux]", linux, "SPARECI_RUNS_ON_LINUX"},
+		{"self-hosted", mac, "SPARECI_RUNS_ON_MACOS"},                                       // this machine's own
+		{"my-big-runner", linux, "SPARECI_RUNS_ON_LINUX"},                                   // x64 Linux host
+		{"my-big-runner", Machine{OS: "linux", Arch: "arm64"}, "SPARECI_RUNS_ON_LINUX_ARM"}, // arm64 Linux host
+	}
+	for _, c := range cases {
+		f := parse(t, "jobs:\n  j:\n    runs-on: "+c.runsOn+"\n", c.m)
+		got, err := f.Rewrite(f.Jobs)
+		if err != nil {
+			t.Fatalf("%s: %v", c.runsOn, err)
+		}
+		if !strings.Contains(string(got), "vars."+c.want+" ||") {
+			t.Errorf("%s on %s/%s: %s, want %s", c.runsOn, c.m.OS, c.m.Arch, got, c.want)
+		}
+	}
+}
+
+// Jobs routed by the old shared variable are offered the per-OS one.
+func TestUpgrade(t *testing.T) {
+	in := `jobs:
+  mac:
+    runs-on: ${{ vars.SPARECI_RUNS_ON || 'macos-15' }}
+  linux:
+    runs-on: "${{ vars.SPARECI_RUNS_ON || 'ubuntu-24.04' }}" # keep me
+  arm:
+    runs-on: ${{ vars.SPARECI_RUNS_ON || fromJSON('["self-hosted","Linux","ARM64"]') }}
+  custom:
+    runs-on: ${{ vars.SPARECI_RUNS_ON || 'my-big-runner' }}
+  done:
+    runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-24.04' }}
+`
+	want := `jobs:
+  mac:
+    runs-on: ${{ vars.SPARECI_RUNS_ON_MACOS || 'macos-15' }}
+  linux:
+    runs-on: "${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-24.04' }}" # keep me
+  arm:
+    runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX_ARM || fromJSON('["self-hosted","Linux","ARM64"]') }}
+  custom:
+    runs-on: ${{ vars.SPARECI_RUNS_ON || 'my-big-runner' }}
+  done:
+    runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-24.04' }}
+`
+	f := parse(t, in, mac)
+	up := Upgradable([]*File{f})
+	var names []string
+	for _, j := range up {
+		names = append(names, j.ID)
+	}
+	if strings.Join(names, ",") != "mac,linux,arm" {
+		t.Fatalf("upgradable = %v, want mac, linux, arm (custom's OS is unknown; done is done)", names)
+	}
+	if j := job(t, f, "done"); j.RoutedBy != "SPARECI_RUNS_ON_LINUX" || j.Upgrade {
+		t.Errorf("done: RoutedBy %q Upgrade %v", j.RoutedBy, j.Upgrade)
+	}
+	got, err := f.Rewrite(up)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+	if again := Upgradable([]*File{parse(t, string(got), mac)}); len(again) != 0 {
+		t.Errorf("still upgradable after upgrading: %v", again)
+	}
+}
+
+func TestWatchdogIsNeverConverted(t *testing.T) {
+	f := parse(t, "# Generated by `spareci watchdog`. Keep it on the default branch.\njobs:\n  watchdog:\n    runs-on: ubuntu-latest\n", macLinux)
+	if j := f.Jobs[0]; !strings.Contains(j.Skip, "watchdog") {
+		t.Errorf("watchdog job Skip = %q", j.Skip)
 	}
 }

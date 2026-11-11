@@ -76,14 +76,14 @@ func (p *Pool) syncRouting(ctx context.Context, want bool) {
 		err = r.Stop(ctx)
 	}
 	if err != nil {
-		slog.Warn("laptop mode: could not update routing; retrying", "variable", r.Var, "on", want, "err", err)
+		slog.Warn("laptop mode: could not update routing; retrying", "variables", r.Vars(), "on", want, "err", err)
 		return
 	}
 	p.routed = want
 	if want {
-		slog.Info("routing on", "variable", r.Var, "value", r.Value, "heartbeat", r.HeartbeatVar)
+		slog.Info("routing on", "variables", r.Vars(), "heartbeat", r.HeartbeatVar)
 	} else {
-		slog.Info("routing off: new jobs go to GitHub-hosted runners", "variable", r.Var)
+		slog.Info("routing off: new jobs go to GitHub-hosted runners", "variables", r.Vars())
 	}
 }
 
