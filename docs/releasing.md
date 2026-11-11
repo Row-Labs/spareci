@@ -6,7 +6,7 @@ Each release publishes:
 
 - `spareci_<os>_<arch>.tar.gz` for darwin and linux, arm64 and amd64: a static binary (`CGO_ENABLED=0`) plus `LICENSE` and `README.md`. The file names carry no version, so `releases/latest/download/spareci_darwin_arm64.tar.gz` always points at the newest build.
 - `checksums.txt` (SHA-256 of each archive).
-- A Homebrew cask, `Casks/spareci.rb`, pushed over SSH to [`Row-Labs/homebrew-spareci`](https://github.com/Row-Labs/homebrew-spareci), so `brew install row-labs/spareci/spareci` works.
+- A Homebrew cask, `Casks/spareci.rb`, pushed over SSH to [`Row-Labs/homebrew-spareci`](https://github.com/Row-Labs/homebrew-spareci), so `brew trust row-labs/spareci && brew install row-labs/spareci/spareci` works.
 
 The version comes from the tag: `v0.1.0` builds a binary whose `spareci version` prints `spareci 0.1.0` (set with `-X main.version`).
 
