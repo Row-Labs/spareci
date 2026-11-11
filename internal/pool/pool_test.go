@@ -2,12 +2,18 @@ package pool
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Row-Labs/spareci/internal/gh"
 	"github.com/Row-Labs/spareci/internal/runner"
+	"github.com/Row-Labs/spareci/internal/stats"
 )
 
 // fakeBackend stands in for the native host or a Linux container backend.
@@ -216,5 +222,88 @@ func TestAssign(t *testing.T) {
 	// A second backend for a kind already taken gets nothing.
 	if bs, _ := Assign([]runner.Backend{arm, &fakeBackend{"linux", "arm64"}}, Policy{Prefix: "spareci"}); len(bs) != 1 {
 		t.Errorf("duplicate backend kept: %d", len(bs))
+	}
+}
+
+// GitHub's jobs API kept listing finished jobs as queued for minutes (run
+// 43099220289), and the pool started a runner for them. A job a runner here
+// started is remembered by ID and no longer counts as queued.
+func TestRanJobIsNotQueuedAgain(t *testing.T) {
+	p, mac, _ := macPool(2, 0, 0)
+	now := time.Now()
+	build := gh.Job{ID: 11, RunID: 1, Name: "build", Labels: []string{"spareci"}, CreatedAt: now}
+	test := gh.Job{ID: 12, RunID: 1, Name: "test", Labels: []string{"spareci"}, CreatedAt: now}
+	p.queued = []gh.Job{build, test}
+	p.claim(mac, "build", now)
+
+	// Minutes later: the runner is gone, but GitHub still lists build.
+	later := now.Add(3 * time.Minute)
+	mine := p.notRan([]gh.Job{build, test}, later)
+	if len(mine) != 1 || mine[0].ID != 12 {
+		t.Fatalf("still queued: %v", mine)
+	}
+	if pl := p.plan(p.notRan([]gh.Job{build}, later), later); len(pl.spawn) != 0 {
+		t.Errorf("started %d runners for a job that already ran", len(pl.spawn))
+	}
+
+	// Forgotten after ranFor.
+	if mine := p.notRan([]gh.Job{build}, now.Add(ranFor+time.Minute)); len(mine) != 1 {
+		t.Errorf("job still ignored after %v", ranFor)
+	}
+}
+
+func TestClaimOnlyWhenUnambiguous(t *testing.T) {
+	p, mac, linux := macPool(2, 0, 0)
+	now := time.Now()
+	// The same job queued in two runs: which one the runner took is unknown,
+	// so neither is ignored.
+	p.queued = []gh.Job{
+		{ID: 21, RunID: 1, Name: "build", Labels: []string{"spareci"}},
+		{ID: 22, RunID: 2, Name: "build", Labels: []string{"spareci"}},
+		{ID: 23, RunID: 3, Name: "lint", Labels: []string{"spareci-linux"}},
+		{ID: 24, RunID: 3, Name: "lint", Labels: []string{"spareci-macos"}},
+	}
+	p.claim(mac, "build", now)
+	if len(p.ran) != 0 {
+		t.Errorf("claimed %v from two candidates", p.ran)
+	}
+	// Two jobs named lint, but only one fits the Linux backend.
+	p.claim(linux, "lint", now)
+	if len(p.ran) != 1 || p.ran[23].IsZero() {
+		t.Errorf("ran = %v, want only 23", p.ran)
+	}
+	// A second runner taking another "lint" can't claim 23 again; 24 doesn't
+	// fit Linux, so nothing.
+	p.claim(linux, "lint", now)
+	if len(p.ran) != 1 {
+		t.Errorf("ran = %v", p.ran)
+	}
+}
+
+// Stopping never waits on GitHub for stats: a job it hasn't caught up on
+// stays pending for the next start.
+func TestStopLeavesStatsPending(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"workflow_runs":[],"jobs":[],"private":true}`) // GitHub hasn't caught up
+	}))
+	t.Cleanup(srv.Close)
+	rec := &stats.Recorder{API: gh.NewWithBase(srv.URL, "test"), Repo: "o/r", Path: filepath.Join(t.TempDir(), "jobs.jsonl"),
+		Retry: time.Millisecond, MaxRetry: 10 * time.Millisecond, Window: time.Hour}
+	p, _, _ := macPool(1, 0, 0)
+	p.cfg.Stats = rec
+	now := time.Now()
+	p.record(stats.Finished{Runner: "spareci-x-1", Job: "build", Started: now, Ended: now})
+	time.Sleep(20 * time.Millisecond)
+
+	start := time.Now()
+	p.stopRecording()
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("stopping waited %v on GitHub", took)
+	}
+	if n := rec.Pending(); n != 1 {
+		t.Errorf("pending = %d, want 1", n)
+	}
+	if _, err := os.Stat(rec.PendingFile()); err != nil {
+		t.Errorf("pending file: %v", err)
 	}
 }

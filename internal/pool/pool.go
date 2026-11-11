@@ -65,10 +65,17 @@ type Pool struct {
 	cfg Config
 	gh  *gh.Client
 
-	mu        sync.Mutex
-	workers   map[string]*worker
-	seq       int
-	recording sync.WaitGroup // jobs being written to the stats file
+	mu      sync.Mutex
+	workers map[string]*worker
+	seq     int
+	// queued is the last poll's queued jobs for this machine, and ran the
+	// IDs of jobs a runner here took, when that's known (see claim).
+	queued []gh.Job
+	ran    map[int64]time.Time
+
+	recording   sync.WaitGroup // jobs being written to the stats file
+	statsCtx    context.Context
+	stopRecords context.CancelFunc
 
 	// Laptop mode (gate.go); only touched by the poll loop.
 	paused, routed bool
@@ -86,7 +93,48 @@ type worker struct {
 }
 
 func New(cfg Config, client *gh.Client) *Pool {
-	return &Pool{cfg: cfg, gh: client, workers: map[string]*worker{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Pool{cfg: cfg, gh: client, workers: map[string]*worker{}, ran: map[int64]time.Time{}, statsCtx: ctx, stopRecords: cancel}
+}
+
+// ranFor is how long a job this machine ran is ignored if GitHub still lists
+// it as queued. GitHub's jobs API has done that for minutes after the job
+// finished (run 43099220289), which would start a runner for nothing.
+const ranFor = time.Hour
+
+// claim notes the ID of the job a runner on b just started, so that later
+// polls don't count it as queued. The runner only prints the job's name,
+// so the ID is taken from the last poll's queued jobs, and only when exactly
+// one there has that name and fits b. When several do (the same job queued
+// in two runs), nothing is claimed rather than risk ignoring a job that is
+// really waiting. p.mu must be held.
+func (p *Pool) claim(b *Backend, job string, now time.Time) {
+	var found []int64
+	for _, j := range p.queued {
+		if j.Name == job && b.fits(j) && p.ran[j.ID].IsZero() {
+			found = append(found, j.ID)
+		}
+	}
+	if len(found) == 1 {
+		p.ran[found[0]] = now
+	}
+}
+
+// notRan drops jobs this machine already ran, and forgets old ones.
+// p.mu must be held.
+func (p *Pool) notRan(jobs []gh.Job, now time.Time) []gh.Job {
+	for id, at := range p.ran {
+		if now.Sub(at) > ranFor {
+			delete(p.ran, id)
+		}
+	}
+	var out []gh.Job
+	for _, j := range jobs {
+		if p.ran[j.ID].IsZero() {
+			out = append(out, j)
+		}
+	}
+	return out
 }
 
 // Matches reports whether some backend can take the job.
@@ -136,6 +184,14 @@ func (p *Pool) Run(ctx, hardCtx context.Context) error {
 		}
 		go r.Beat(ctx)
 	}
+	if p.cfg.Stats != nil && !p.cfg.DryRun {
+		// Jobs whose stats a previous run couldn't finish before stopping.
+		if n, err := p.cfg.Stats.Resume(p.statsCtx, &p.recording); err != nil {
+			slog.Warn("could not read pending job stats", "err", err)
+		} else if n > 0 {
+			slog.Info("recording job stats left pending last time", "jobs", n)
+		}
+	}
 
 	t := time.NewTicker(p.cfg.Interval)
 	defer t.Stop()
@@ -162,6 +218,10 @@ func (p *Pool) tick(ctx, hardCtx context.Context) error {
 			mine = append(mine, j)
 		}
 	}
+	p.mu.Lock()
+	mine = p.notRan(mine, time.Now())
+	p.queued = mine
+	p.mu.Unlock()
 	if !p.admit(ctx, mine) {
 		return nil
 	}
@@ -387,6 +447,7 @@ func (p *Pool) spawn(ctx, hardCtx context.Context, b *Backend) error {
 			now := time.Now()
 			p.mu.Lock()
 			w.started, w.job = now, job
+			p.claim(b, job, now)
 			p.mu.Unlock()
 			if p.cfg.Stats != nil {
 				p.cfg.Stats.Started(name, now)
@@ -416,27 +477,32 @@ func (p *Pool) spawn(ctx, hardCtx context.Context, b *Backend) error {
 }
 
 // record adds a finished job to the stats file in the background. It asks
-// GitHub about the job, which can take a little while after the job ends.
+// GitHub about the job, which can take minutes after the job ends.
 func (p *Pool) record(f stats.Finished) {
 	p.recording.Add(1)
 	go func() {
 		defer p.recording.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-		defer cancel()
-		if _, err := p.cfg.Stats.Done(ctx, f); err != nil {
+		if _, err := p.cfg.Stats.Done(p.statsCtx, f); err != nil && p.statsCtx.Err() == nil {
 			slog.Warn("could not record job stats", "job", f.Job, "err", err)
 		}
 	}()
 }
 
-// waitRecording waits up to d for jobs still being recorded.
-func (p *Pool) waitRecording(d time.Duration) {
+// stopRecording stops looking jobs up. Those not recorded yet stay in the
+// stats pending file, and the next `spareci up` finishes them, so stopping
+// never waits on GitHub.
+func (p *Pool) stopRecording() {
+	p.stopRecords()
 	done := make(chan struct{})
 	go func() { p.recording.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(d):
-		slog.Warn("stopped before every finished job was added to spareci stats")
+	case <-time.After(5 * time.Second):
+	}
+	if p.cfg.Stats != nil {
+		if n := p.cfg.Stats.Pending(); n > 0 {
+			slog.Info("job stats left pending; the next spareci up records them", "jobs", n)
+		}
 	}
 }
 
@@ -449,7 +515,14 @@ func (p *Pool) rescueQueued() {
 	if !r.Enabled() {
 		return
 	}
-	n, err := RescueQueued(ctx, p.gh, r, func(j gh.Job) bool { return p.Matches(j) && r.Routed(j) })
+	n, err := RescueQueued(ctx, p.gh, r, func(j gh.Job) bool {
+		p.mu.Lock()
+		ran := !p.ran[j.ID].IsZero()
+		p.mu.Unlock()
+		// A finished job GitHub still lists as queued needs no rescue, and
+		// its run may be complete: re-running it would run the jobs again.
+		return !ran && p.Matches(j) && r.Routed(j)
+	})
 	if n > 0 || err != nil {
 		slog.Info("sent queued jobs to GitHub-hosted runners", "runs", n, "err", err)
 	}
@@ -507,7 +580,7 @@ func (p *Pool) drain(hardCtx context.Context) error {
 		left := len(p.workers)
 		p.mu.Unlock()
 		if left == 0 {
-			p.waitRecording(time.Minute)
+			p.stopRecording()
 			return nil
 		}
 		if busy > 0 {
@@ -516,6 +589,7 @@ func (p *Pool) drain(hardCtx context.Context) error {
 		select {
 		case <-hardCtx.Done():
 			time.Sleep(2 * time.Second) // let runners deregister
+			p.stopRecording()
 			return nil
 		case <-time.After(5 * time.Second):
 		}

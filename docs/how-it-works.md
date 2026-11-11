@@ -233,7 +233,11 @@ When a runner prints `Running job:`, `stats.Recorder` starts looking for the job
 4. The fallback is read from the two `runs-on` forms `spareci init` writes, `vars.X || 'label'` and `vars.X || fromJSON('[...]')`. Anything else is recorded with the reason.
 5. One JSON line is appended to `<cache dir>/stats/jobs.jsonl` with `O_APPEND` in a single write, so several `spareci up` processes share the file. `spareci stats` skips (and counts) a line a crash cut short.
 
-If GitHub can't be reached, the job is still recorded, with this machine's times and no fallback, so it shows as not counted rather than disappearing. `^C` waits up to a minute for jobs still being recorded.
+GitHub's jobs API can lag by minutes: on 2026-11-11 (run 43099220289) finished jobs were still listed as queued, with no runner, for about three minutes. So if the job isn't found while it runs, the lookup keeps going in the background after it ends, waiting 3s, then doubling up to a minute between tries, for up to 10 minutes (`Window`). If GitHub still can't say, the job is recorded with this machine's times and no fallback, so it shows as not counted rather than disappearing.
+
+A finished job sits in `<cache dir>/stats/pending/<owner>_<repo>.json` until its line is written, so neither `^C` nor a crash loses it. `^C` doesn't wait on GitHub: it stops the lookups and leaves them in that file, and the next `spareci up` for the repo resumes them with a fresh window (`Recorder.Resume`). A job already in `jobs.jsonl` (a crash between the two writes) isn't recorded twice.
+
+The same lag made the pool start a runner for a finished job. So when a runner starts a job, the pool notes that job's ID from the last poll's queued list, and for an hour stops counting that ID as queued or rescuing it at shutdown. The runner only prints the job's name, so the ID is noted only when exactly one queued job has that name and fits the runner's backend; with two (the same job in two runs) nothing is noted, and the 20-second cover for a just-started runner is all that applies.
 
 Pricing happens when `stats` runs, not when the job is recorded, through `estimate.ForLabels` and `estimate.Minutes`, the same code `estimate` bills with; `TestPriceMatchesEstimate` checks that the two agree.
 
