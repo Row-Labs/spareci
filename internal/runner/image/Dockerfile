@@ -2,6 +2,15 @@
 # use, per architecture and runner version; never pushed to a registry.
 # It is not GitHub's ubuntu-24.04 image: see docs/linux-containers.md for what
 # is missing.
+
+# The Docker API proxy jobs talk to (dockerproxy/main.go): rewrites bind-mount
+# paths under /home/runner to where the daemon sees the job's volume. Built
+# for the target from the build machine's platform, so no emulation.
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS dockerproxy
+ARG TARGETARCH
+COPY dockerproxy/main.go /src/main.go
+RUN cd /src && CGO_ENABLED=0 GOARCH=$TARGETARCH go build -trimpath -ldflags=-s -o /spareci-dockerproxy main.go
+
 FROM ubuntu:24.04
 
 ARG RUNNER_VERSION
@@ -63,6 +72,7 @@ RUN arch=$([ "$TARGETARCH" = amd64 ] && echo x64 || echo "$TARGETARCH") \
  && python3 -c 'import os, shutil, sys; p=sys.argv[1]; d=open(p,"rb").read(); a="ACTIONS_RESULTS_URL".encode("utf-16-le"); b="ACTIONS_RESULTS_ORL".encode("utf-16-le"); os.unlink(p); open(p,"wb").write(d.replace(a,b)) if a in d else (shutil.rmtree("/opt/runner-cache"), print("worker has no ACTIONS_RESULTS_URL: jobs here will use GitHub cache"))' /opt/runner-cache/bin/Runner.Worker.dll \
  && { [ ! -d /opt/runner-cache ] || chown runner:runner /opt/runner-cache/bin/Runner.Worker.dll; }
 
+COPY --from=dockerproxy /spareci-dockerproxy /usr/local/bin/spareci-dockerproxy
 COPY entrypoint.sh /usr/local/bin/spareci-entrypoint
 RUN chmod 0755 /usr/local/bin/spareci-entrypoint
 WORKDIR /home/runner

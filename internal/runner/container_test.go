@@ -237,9 +237,10 @@ func TestContainerRun(t *testing.T) {
 	for _, want := range []string{
 		"--platform linux/arm64", "--stop-signal SIGINT", "--cpus 4", "--memory 8g",
 		"-v spareci-toolcache-Row-Labs_spareci-arm64:/opt/hostedtoolcache",
-		"-v /var/run/docker.sock:/var/run/docker.sock",
-		"-v " + vol + ":/var/lib/docker/volumes/" + vol + "/_data",
-		"SPARECI_RUNNER_ROOT=/var/lib/docker/volumes/" + vol + "/_data",
+		"-v /var/run/docker.sock:/run/spareci/docker.sock",
+		"-v " + vol + ":/home/runner ",
+		"SPARECI_DOCKER_MAP=/home/runner=/var/lib/docker/volumes/" + vol + "/_data" +
+			" /opt/hostedtoolcache=/var/lib/docker/volumes/spareci-toolcache-Row-Labs_spareci-arm64/_data ",
 	} {
 		if !strings.Contains(args, want) {
 			t.Errorf("docker run lacks %q:\n%s", want, args)
@@ -266,6 +267,40 @@ func TestContainerRun(t *testing.T) {
 	}
 }
 
+// Every job of a repo sees the same paths: its work volume is mounted at the
+// same place whatever the volume is called, and only the daemon-side paths
+// the proxy maps to differ. Caches keyed on paths (setup-node's pnpm store)
+// then match from job to job, as on GitHub.
+func TestContainerJobsSeeTheSamePaths(t *testing.T) {
+	f := newFakeRuntime()
+	c := prepared(t, f, &Container{})
+	for _, name := range []string{"spareci-mac-1-1", "spareci-mac-2-7"} {
+		if _, err := c.Run(context.Background(), name, "jit", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runs := f.called("run", "--name")
+	if len(runs) != 2 {
+		t.Fatalf("runs = %v", runs)
+	}
+	var mounts [2][]string
+	for i, r := range runs {
+		for j := 0; j+1 < len(r); j++ {
+			if r[j] == "-v" {
+				_, target, _ := strings.Cut(r[j+1], ":")
+				mounts[i] = append(mounts[i], target)
+			}
+		}
+	}
+	if strings.Join(mounts[0], " ") != strings.Join(mounts[1], " ") {
+		t.Errorf("jobs mount different paths:\n%v\n%v", mounts[0], mounts[1])
+	}
+	a, b := strings.Join(runs[0], " "), strings.Join(runs[1], " ")
+	if !strings.Contains(a, "spareci-job-spareci-mac-1-1:/home/runner") || !strings.Contains(b, "spareci-job-spareci-mac-2-7:/home/runner") {
+		t.Errorf("jobs don't each get their own volume at /home/runner:\n%s\n%s", a, b)
+	}
+}
+
 func TestContainerRunNoDocker(t *testing.T) {
 	f := newFakeRuntime()
 	c := prepared(t, f, &Container{DockerMode: DockerNone})
@@ -273,7 +308,7 @@ func TestContainerRunNoDocker(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := strings.Join(f.called("run", "--name")[0], " ")
-	if strings.Contains(args, "docker.sock") || strings.Contains(args, "SPARECI_RUNNER_ROOT") {
+	if strings.Contains(args, "docker.sock") || strings.Contains(args, "SPARECI_DOCKER_MAP") || strings.Contains(args, "/home/runner") {
 		t.Errorf("docker passed through with DockerNone: %s", args)
 	}
 	if len(f.called("volume", "create")) != 0 {

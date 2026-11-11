@@ -2,6 +2,7 @@ package route
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 	"text/template"
 )
@@ -47,7 +48,9 @@ func Watchdog(routingVars []string, heartbeatVar string) string {
 }
 
 var watchdogTmpl = template.Must(template.New("watchdog").Delims("<%", "%>").Funcs(template.FuncMap{
-	"q": func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" },
+	// Double quotes, as Prettier writes YAML strings, so the file passes
+	// prettier --check unchanged (testdata/spareci-watchdog.yml).
+	"q": func(s string) string { return strconv.Quote(s) },
 	"any": func(vars []string) string {
 		var parts []string
 		for _, v := range vars {
