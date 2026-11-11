@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -22,14 +23,15 @@ type API interface {
 	Repo(ctx context.Context, repo string) (gh.Repo, error)
 }
 
-// Finished is what the runner saw of a job on this machine.
+// Finished is what the runner saw of a job on this machine. It's also what
+// the pending file holds for a job whose record isn't written yet.
 type Finished struct {
-	Runner     string // runner name, which GitHub reports on the job
-	Backend    string // which of the pool's backends ran it, e.g. linux-arm64
-	Job        string // job name the runner printed
-	Conclusion string // the runner's: Succeeded, Failed, Canceled
-	Started    time.Time
-	Ended      time.Time
+	Runner     string    `json:"runner"`            // runner name, which GitHub reports on the job
+	Backend    string    `json:"backend,omitempty"` // which of the pool's backends ran it, e.g. linux-arm64
+	Job        string    `json:"job"`               // job name the runner printed
+	Conclusion string    `json:"conclusion,omitempty"`
+	Started    time.Time `json:"started"`
+	Ended      time.Time `json:"ended"`
 }
 
 // Recorder writes a Record for each job a repo's runners finish.
@@ -39,11 +41,19 @@ type Recorder struct {
 	Var  string // the routing variable in runs-on; default SPARECI_RUNS_ON
 	Path string // jobs.jsonl
 
-	Retry time.Duration // between lookups while GitHub catches up; default 3s
-	Tries int           // lookups before giving up; default 10
+	Retry time.Duration // first wait between lookups while GitHub catches up, doubling up to MaxRetry; default 3s
+	Tries int           // lookups while the job runs, and reads of its final times; default 10
+	// MaxRetry caps the wait between lookups; default 1m.
+	MaxRetry time.Duration
+	// Window is how long after a job ends (or after a restart, for a job
+	// left pending) its lookup keeps going. GitHub's jobs API has lagged
+	// by minutes. Default 10m.
+	Window time.Duration
 
 	mu      sync.Mutex
-	pending map[string]*lookup // runner name → job lookup started when the job did
+	pending map[string]*lookup  // runner name → job lookup started when the job did
+	unsaved map[string]Finished // runner name → finished job not yet in the stats file
+	fileMu  sync.Mutex          // serialises writes of the pending file
 	files   map[string]*workflows.File
 	public  *bool
 	now     func() time.Time
@@ -60,6 +70,29 @@ func (r *Recorder) retry() time.Duration {
 		return r.Retry
 	}
 	return 3 * time.Second
+}
+
+func (r *Recorder) window() time.Duration {
+	if r.Window > 0 {
+		return r.Window
+	}
+	return 10 * time.Minute
+}
+
+// backoff is the wait before lookup n+1: Retry, doubling, at most MaxRetry.
+func (r *Recorder) backoff(n int) time.Duration {
+	limit := r.MaxRetry
+	if limit <= 0 {
+		limit = time.Minute
+	}
+	d := r.retry()
+	for range n {
+		if d >= limit {
+			break
+		}
+		d *= 2
+	}
+	return min(d, limit)
 }
 
 func (r *Recorder) tries() int {
@@ -98,36 +131,116 @@ func (r *Recorder) Started(runner string, at time.Time) {
 }
 
 // Done records a finished job and logs the running total. It returns the
-// record it wrote. A job GitHub can't tell us about is still recorded, with
-// this machine's times and no fallback, so it isn't priced.
+// record it wrote. GitHub's jobs API can lag by minutes, so the lookup is
+// retried with backoff for Window after the job ended. A job GitHub still
+// can't tell us about is recorded with this machine's times and no fallback,
+// so it isn't priced.
+//
+// The job is in the pending file (PendingFile) until its record is written.
+// If ctx ends first (spareci is stopping), Done returns ctx.Err() and leaves
+// it there for Resume on the next start.
 func (r *Recorder) Done(ctx context.Context, f Finished) (Record, error) {
-	r.Started(f.Runner, f.Started) // no-op if it was called
-	r.mu.Lock()
-	l := r.pending[f.Runner]
-	r.mu.Unlock()
-	select {
-	case <-l.done:
-	case <-ctx.Done():
-		return Record{}, ctx.Err()
+	if err := r.addPending(f); err != nil {
+		slog.Warn("could not save pending job stats; they're lost if spareci stops first", "err", err)
+	}
+	return r.done(ctx, f, f.Ended.Add(r.window()))
+}
+
+// Resume finishes the jobs a previous run left pending, each with a fresh
+// Window. It returns how many there were; their records are written in the
+// background, tracked by wg.
+func (r *Recorder) Resume(ctx context.Context, wg *sync.WaitGroup) (int, error) {
+	left, err := r.loadPending()
+	if err != nil {
+		return 0, err
+	}
+	// A crash between writing a record and updating the pending file
+	// leaves a job in both; it's already recorded.
+	if recs, _, err := Load(r.Path); err == nil && len(left) > 0 {
+		for _, rec := range recs {
+			left = slices.DeleteFunc(left, func(f Finished) bool { return rec.Repo == r.Repo && f.Runner == rec.Runner })
+		}
+		_ = r.savePendingList(left)
 	}
 	r.mu.Lock()
+	if r.unsaved == nil {
+		r.unsaved = map[string]Finished{}
+	}
+	for _, f := range left {
+		r.unsaved[f.Runner] = f
+	}
+	r.mu.Unlock()
+	deadline := r.clock().Add(r.window())
+	for _, f := range left {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := r.done(ctx, f, deadline); err != nil && ctx.Err() == nil {
+				slog.Warn("could not record job stats", "job", f.Job, "err", err)
+			}
+		}()
+	}
+	return len(left), nil
+}
+
+func (r *Recorder) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+func (r *Recorder) done(ctx context.Context, f Finished, deadline time.Time) (Record, error) {
+	r.mu.Lock()
+	l := r.pending[f.Runner]
 	delete(r.pending, f.Runner)
 	r.mu.Unlock()
 
+	var job gh.Job
+	err := errNotFound
+	if l != nil {
+		select {
+		case <-l.done:
+			job, err = l.job, l.err
+		case <-ctx.Done():
+			return Record{}, ctx.Err()
+		}
+	}
+	// The run may have finished since, or GitHub may not show the runner
+	// on the job yet: keep looking among recent runs until the deadline.
+	for n := 0; err != nil; n++ {
+		if job, err = r.findOnce(ctx, f.Runner, f.Started); err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return Record{}, ctx.Err()
+		}
+		wait := r.backoff(n)
+		if r.clock().Add(wait).After(deadline) {
+			break
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return Record{}, ctx.Err()
+		}
+	}
+
 	rec := Record{Repo: r.Repo, Runner: f.Runner, Backend: f.Backend, Job: f.Job, Started: f.Started, Ended: f.Ended, Conclusion: f.Conclusion}
 	rec.Public = r.isPublic(ctx)
-	job, err := l.job, l.err
-	if err != nil {
-		// The run may have finished since; look once more among recent runs.
-		job, err = r.find(ctx, f.Runner, f.Started, 2)
-	}
 	if err != nil {
 		rec.FallbackError = err.Error()
 	} else {
 		r.fill(ctx, &rec, job)
 	}
+	if ctx.Err() != nil {
+		return Record{}, ctx.Err() // half-filled; leave it pending
+	}
 	if err := Append(r.Path, rec); err != nil {
 		return rec, err
+	}
+	if err := r.removePending(f.Runner); err != nil {
+		slog.Warn("could not update pending job stats; the job may be recorded twice", "err", err)
 	}
 	r.logTotal(rec)
 	return rec, nil
