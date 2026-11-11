@@ -81,7 +81,7 @@ Rosetta costs about 6x on compiler-heavy work like this. GitHub's whole `build` 
 | Job | x64 (Rosetta), cold / warm | arm64 (`--linux-x64-on-arm`), cold / warm | Hosted `ubuntu-24.04` |
 |---|---|---|---|
 | `build` | 108 / 37 | 33 / 14 | 21 (25–41) |
-| `cache-save` | 13 / 12 | 7 / 8 | 10 (5–8) |
+| `cache-save` | 13 / 12 | 7 / 8 | 10 (5–10) |
 | `cache-restore` | 9 / 12 | 7 / 9 | 5 (5–15) |
 
 Runs 43101146581 and 43101489980 (x64), 43101737090 and 43101874814 (arm64), all green. In each run, `cache-save` saw `ACTIONS_RESULTS_URL=http://host.docker.internal:<port>/` and saved to the local cache, `cache-restore` hit it, and `setup-go`'s module and build cache was saved locally and hit in the warm run. After each job, its container and work volume were gone (`docker ps -a` and `docker volume ls` filtered on spareci's labels were empty).
