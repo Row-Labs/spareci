@@ -26,6 +26,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli docker-buildx-plugin docker-compose-plugin gh \
  && rm -rf /var/lib/apt/lists/*
 
+# Node.js on PATH, as on GitHub's images. Jobs pick their own version with
+# setup-node, but some actions run before it and assume a node binary exists:
+# pnpm/action-setup's installer, for one, fails with "node: not found".
+# Latest release of an LTS major, checked against nodejs.org's SHASUMS256.
+ARG NODE_MAJOR=24
+RUN arch=$([ "$TARGETARCH" = amd64 ] && echo x64 || echo "$TARGETARCH") \
+ && base="https://nodejs.org/dist/latest-v${NODE_MAJOR}.x" \
+ && curl -fsSL "$base/SHASUMS256.txt" -o /tmp/SHASUMS256.txt \
+ && file=$(grep -oE "node-v[0-9.]+-linux-${arch}\.tar\.xz" /tmp/SHASUMS256.txt | head -1) \
+ && curl -fsSL "$base/$file" -o "/tmp/$file" \
+ && (cd /tmp && grep " $file\$" SHASUMS256.txt | sha256sum -c -) \
+ && tar -xJf "/tmp/$file" -C /usr/local --strip-components=1 --exclude='*.md' --exclude=LICENSE \
+ && rm -f "/tmp/$file" /tmp/SHASUMS256.txt \
+ && node --version && npm --version
+
 # The runner user matches GitHub's hosted images (uid 1001, passwordless sudo).
 RUN userdel -r ubuntu 2>/dev/null || true \
  && groupadd -g 1001 runner && useradd -m -u 1001 -g runner -s /bin/bash runner \

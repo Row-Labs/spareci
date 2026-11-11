@@ -49,9 +49,11 @@ The `Docker` interface is small (run to completion, stream a run), so a `contain
 
 ### Missing compared with GitHub's `ubuntu-24.04`
 
+Node.js (the latest release of an LTS line, currently 24) **is** on PATH, as on GitHub's image: some actions run before `setup-node` and need a `node` binary, `pnpm/action-setup` among them. Jobs that need a specific version still use `setup-node`.
+
 GitHub's image is tens of GB with hundreds of tools. Jobs that use `setup-*` actions work the same here. Jobs that assume a preinstalled tool fail with "command not found" until they add the setup step. Not included:
 
-- **Language runtimes on PATH:** Node.js (GitHub's has Node 20 without `setup-node`), Go, Java, .NET, Ruby, PHP, Rust (rustup), Swift, Kotlin, Julia, Haskell, and the pre-populated tool cache. Use `setup-node`, `setup-go`, `setup-java`, `dtolnay/rust-toolchain` and so on. The tool cache volume keeps them after the first job.
+- **Language runtimes on PATH:** Go, Java, .NET, Ruby, PHP, Rust (rustup), Swift, Kotlin, Julia, Haskell, and the pre-populated tool cache. Use `setup-node`, `setup-go`, `setup-java`, `dtolnay/rust-toolchain` and so on. The tool cache volume keeps them after the first job.
 - **Package managers:** yarn, pnpm, pipx, Homebrew, conda.
 - **Compilers and build tools:** clang/LLVM, gfortran, cmake, ninja, bazel.
 - **Browsers:** Chrome, Firefox, Edge and their drivers. Playwright and Puppeteer install their own.
