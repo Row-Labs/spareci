@@ -6,7 +6,7 @@ Each release publishes:
 
 - `spareci_<os>_<arch>.tar.gz` for darwin and linux, arm64 and amd64: a static binary (`CGO_ENABLED=0`) plus `LICENSE` and `README.md`. The file names carry no version, so `releases/latest/download/spareci_darwin_arm64.tar.gz` always points at the newest build.
 - `checksums.txt` (SHA-256 of each archive).
-- A Homebrew cask, `Casks/spareci.rb`, pushed to [`Row-Labs/homebrew-spareci`](https://github.com/Row-Labs/homebrew-spareci), so `brew install row-labs/spareci/spareci` works.
+- A Homebrew cask, `Casks/spareci.rb`, pushed over SSH to [`Row-Labs/homebrew-spareci`](https://github.com/Row-Labs/homebrew-spareci), so `brew install row-labs/spareci/spareci` works.
 
 The version comes from the tag: `v0.1.0` builds a binary whose `spareci version` prints `spareci 0.1.0` (set with `-X main.version`).
 
@@ -16,12 +16,16 @@ The owner does this once, before the first release.
 
 1. **Make `Row-Labs/spareci` public.** Release downloads, `go install` and the Homebrew cask all need anonymous access to the repo.
 2. **Create the tap repo** `Row-Labs/homebrew-spareci`: public, with a default branch (initialize it with a README). GoReleaser creates `Casks/spareci.rb` in it on the first release.
-3. **Create a fine-grained personal access token** (Settings → Developer settings → Fine-grained tokens):
-   - Resource owner: `Row-Labs` (if the org requires approval for fine-grained tokens, approve it under the org's Settings → Personal access tokens)
-   - Repository access: only `Row-Labs/homebrew-spareci`
-   - Permissions: Contents → Read and write (Metadata read-only is added automatically)
-   - Expiration: whatever you're comfortable rotating; when it expires, the release still publishes binaries but the Homebrew step fails.
-4. **Add it as a secret** on `Row-Labs/spareci`: Settings → Secrets and variables → Actions → New repository secret, name `HOMEBREW_TAP_TOKEN`.
+3. **Create a deploy key for the tap.** It's an SSH key that can write to `Row-Labs/homebrew-spareci` and nothing else, never expires, and needs no org approval:
+
+   ```sh
+   ssh-keygen -t ed25519 -N "" -C "spareci release" -f /tmp/spareci-tap-key
+   gh repo deploy-key add /tmp/spareci-tap-key.pub --repo Row-Labs/homebrew-spareci --allow-write --title "spareci release"
+   gh secret set HOMEBREW_TAP_DEPLOY_KEY --repo Row-Labs/spareci < /tmp/spareci-tap-key
+   rm /tmp/spareci-tap-key /tmp/spareci-tap-key.pub
+   ```
+
+   That adds the public half to the tap repo (Settings → Deploy keys, "Allow write access") and stores the private half as the `HOMEBREW_TAP_DEPLOY_KEY` secret on `Row-Labs/spareci`. To rotate it, delete the deploy key and repeat.
 
 The release itself uses the workflow's own `GITHUB_TOKEN` (`contents: write`) to create the GitHub release. The Apple secrets below are optional: without them the release still works and ships unsigned macOS binaries.
 
