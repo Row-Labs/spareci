@@ -218,22 +218,7 @@ func (h *Host) Run(ctx context.Context, name, jitConfig string, extraEnv []strin
 	scanDone := make(chan struct{})
 	go func() {
 		defer close(scanDone)
-		sc := bufio.NewScanner(pr)
-		for sc.Scan() {
-			line := sc.Text()
-			fmt.Fprintln(logf, line)
-			// Runner stdout: "2026-11-10 18:00:00Z: Running job: checks"
-			if _, rest, ok := strings.Cut(line, "Running job: "); ok {
-				res.Job = rest
-				slog.Info("job started", "runner", name, "job", rest)
-				if onStart != nil {
-					onStart(rest)
-				}
-			}
-			if _, rest, ok := strings.Cut(line, "completed with result: "); ok {
-				res.Conclusion = rest
-			}
-		}
+		watchRunner(pr, logf, name, &res, onStart)
 	}()
 
 	waitErr := make(chan error, 1)
@@ -256,6 +241,31 @@ func (h *Host) Run(ctx context.Context, name, jitConfig string, extraEnv []strin
 		return res, ctx.Err()
 	}
 	return res, err
+}
+
+// watchRunner copies a runner's output to log until r ends, noting in res the
+// job it took and how that ended, and calling onStart when the job starts.
+func watchRunner(r io.Reader, log io.Writer, name string, res *Result, onStart func(job string)) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Text()
+		fmt.Fprintln(log, line)
+		// Runner stdout: "2026-11-10 18:00:00Z: Running job: checks"
+		if _, rest, ok := strings.Cut(line, "Running job: "); ok {
+			res.Job = rest
+			slog.Info("job started", "runner", name, "job", rest)
+			if onStart != nil {
+				onStart(rest)
+			}
+		}
+		if _, rest, ok := strings.Cut(line, "completed with result: "); ok {
+			res.Conclusion = rest
+		}
+	}
+	// A line too long for the scanner ends the scan; keep draining so the
+	// runner never blocks on a full pipe.
+	_, _ = io.Copy(log, r)
 }
 
 func clone(src, dst string) error {

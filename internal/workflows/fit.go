@@ -32,6 +32,22 @@ type Machine struct {
 	// Linux lists the architectures (route.ARM64, route.X64) this Mac can
 	// run Linux jobs for in containers; empty without a container runtime.
 	Linux []string
+	// X64AsARM: Linux x64 jobs run as arm64 here (spareci up's
+	// --linux-x64-on-arm, the default on arm64 machines), so they're
+	// recommended with a note saying so.
+	X64AsARM bool
+}
+
+// x64AsARMNote is the Why of a Linux x64 job this machine runs as arm64.
+const x64AsARMNote = "runs as arm64 here (--linux-x64-on-arm); leave it out if it needs x64-only binaries"
+
+// linuxARM reports whether this machine runs Linux arm64 jobs: natively, or
+// in a Mac's containers.
+func (m Machine) linuxARM() bool {
+	if m.OS == "linux" {
+		return m.Arch == "arm64"
+	}
+	return slices.Contains(m.Linux, route.ARM64)
 }
 
 // Assess sets each job's Fit and Why for this machine, and the routing
@@ -132,6 +148,8 @@ func (m Machine) fitHosted(label string) (Fit, string) {
 		return FitNo, "Windows job; spareci runs on macOS and Linux"
 	case goos == "darwin" && m.OS != "darwin":
 		return FitNo, "macOS job; needs a Mac"
+	case goos == "linux" && arch == "amd64" && m.X64AsARM && m.linuxARM():
+		return FitGood, x64AsARMNote
 	case goos == "linux" && m.OS == "darwin":
 		want := archName[arch]
 		switch {

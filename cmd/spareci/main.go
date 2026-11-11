@@ -35,7 +35,7 @@ Usage:
   spareci init      [--jobs workflow:job,...] [--all-compatible] [--dry-run]
                     opt this repo's workflow jobs in to spareci and open a PR
   spareci up        [--repo owner/name] [--label spareci] [--max 1] [--max-wait 10m]
-                    [--max-macos N] [--max-linux N] [--linux-x64-on-arm]
+                    [--max-macos N] [--max-linux N] [--linux-x64-on-arm=false]
                     [--dry-run] [--cache=true] [--cache-size 10GB]
                     [--job-home spareci|user|PATH] [--git-mirror=true]
                     [--only-on-ac] [--idle 10m] [--hours 18:00-08:00]
@@ -155,6 +155,7 @@ type upOpts struct {
 	upstream  *string
 	jobHome   *string
 	gitMirror *bool
+	linux     linuxOpts
 	laptop    *laptopOpts
 }
 
@@ -165,7 +166,7 @@ func upFlags(fs *flag.FlagSet) *upOpts {
 		maxN:      fs.Int("max", 1, "concurrent jobs, of every kind"),
 		maxMacOS:  fs.Int("max-macos", 0, "concurrent macOS jobs (0: up to --max)"),
 		maxLinux:  fs.Int("max-linux", 0, "concurrent Linux jobs (0: up to --max)"),
-		x64OnARM:  fs.Bool("linux-x64-on-arm", false, "run Linux x64 jobs (SPARECI_RUNS_ON_LINUX) in arm64 containers when there's no x64 backend"),
+		x64OnARM:  fs.Bool("linux-x64-on-arm", true, "on an arm64 machine, run Linux x64 jobs (SPARECI_RUNS_ON_LINUX, ubuntu-24.04) as arm64; =false runs them as x64 (in containers under Rosetta on a Mac)"),
 		maxWait:   fs.Duration("max-wait", 10*time.Minute, "send a job queued here longer than this to GitHub-hosted runners (0 to never)"),
 		interval:  fs.Duration("interval", 5*time.Second, "poll interval"),
 		dry:       fs.Bool("dry-run", false, "log the jobs we would take; register nothing"),
@@ -176,7 +177,12 @@ func upFlags(fs *flag.FlagSet) *upOpts {
 		upstream:  fs.String("cache-upstream", cache.DefaultUpstream, "GitHub results service, for calls the local cache passes through (artifacts)"),
 		jobHome:   fs.String("job-home", runner.HomeSpareci, `HOME for jobs: "spareci" (a separate home per repo), "user" (your own home and environment), or a path`),
 		gitMirror: fs.Bool("git-mirror", true, "keep a local mirror of the repo so checkouts fetch only new objects (needs a separate --job-home)"),
-		laptop:    laptopFlags(fs),
+		linux: linuxOpts{
+			cpus:   fs.String("linux-cpus", "", `CPUs per Linux job container, as docker run --cpus takes them ("4"; default: no limit)`),
+			memory: fs.String("linux-memory", "", `memory per Linux job container, as docker run --memory takes it ("16g"; default: no limit)`),
+			docker: fs.String("linux-docker", runner.DockerSocket, `docker for Linux jobs: "socket" (the runtime's socket; jobs control it, no isolation) or "none"`),
+		},
+		laptop: laptopFlags(fs),
 	}
 }
 
@@ -253,7 +259,7 @@ func up(args []string) error {
 		}
 	}
 
-	all := append([]runner.Backend{host}, linuxBackends(soft, host, *dry)...)
+	all := append([]runner.Backend{host}, linuxBackends(soft, host, c.repo, *dry, *o.x64OnARM, o.linux)...)
 	backends, targets := pool.Assign(all, pool.Policy{
 		Prefix: c.label, X64OnARM: *o.x64OnARM, Legacy: true,
 		Max: map[string]int{runner.OSMacOS: *o.maxMacOS, runner.OSLinux: *o.maxLinux},
