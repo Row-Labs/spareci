@@ -11,7 +11,7 @@
 | `internal/route` | Routing and heartbeat variables, sending queued jobs back to GitHub, the watchdog workflow |
 | `internal/ghapp` | `spareci watchdog --setup`: creates the watchdog's GitHub App through the manifest flow and stores its secrets |
 | `internal/service` | `spareci install`: launchd agent (macOS), systemd user unit (Linux) |
-| `internal/runner` | Installs `actions/runner`, clones it per job, runs it with the job's home and environment, patches the worker for the cache |
+| `internal/runner` | The `Backend` interface. `Host`: installs `actions/runner`, clones it per job, runs it with the job's home and environment, patches the worker for the cache. `Container`: Linux jobs in a fresh container each ([linux-containers.md](linux-containers.md)) |
 | `internal/cache` | Local implementation of GitHub's cache service |
 | `internal/gitmirror` | A local mirror of the repo that checkouts borrow objects from |
 | `internal/workflows` | `spareci init`: finds jobs' `runs-on`, judges which suit this machine, rewrites the chosen lines in place |

@@ -35,7 +35,9 @@ RUN userdel -r ubuntu 2>/dev/null || true \
 
 # actions/runner, plus a copy whose worker lets spareci's local cache supply
 # ACTIONS_RESULTS_URL (the same same-length rename as internal/runner/patch.go).
-# Hard links: only the patched worker takes extra space.
+# Hard links: only the patched worker takes extra space. If a runner release
+# drops the string there is no patched copy, and jobs use GitHub's cache, as
+# on the host.
 RUN arch=$([ "$TARGETARCH" = amd64 ] && echo x64 || echo "$TARGETARCH") \
  && mkdir -p /opt/runner \
  && curl -fsSL "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${arch}-${RUNNER_VERSION}.tar.gz" | tar xz -C /opt/runner \
@@ -43,8 +45,8 @@ RUN arch=$([ "$TARGETARCH" = amd64 ] && echo x64 || echo "$TARGETARCH") \
  && rm -rf /var/lib/apt/lists/* \
  && chown -R runner:runner /opt/runner \
  && cp -al /opt/runner /opt/runner-cache \
- && python3 -c 'import os, sys; p=sys.argv[1]; d=open(p,"rb").read(); a="ACTIONS_RESULTS_URL".encode("utf-16-le"); b="ACTIONS_RESULTS_ORL".encode("utf-16-le"); assert a in d, "worker has no ACTIONS_RESULTS_URL"; os.unlink(p); open(p,"wb").write(d.replace(a,b))' /opt/runner-cache/bin/Runner.Worker.dll \
- && chown runner:runner /opt/runner-cache/bin/Runner.Worker.dll
+ && python3 -c 'import os, shutil, sys; p=sys.argv[1]; d=open(p,"rb").read(); a="ACTIONS_RESULTS_URL".encode("utf-16-le"); b="ACTIONS_RESULTS_ORL".encode("utf-16-le"); os.unlink(p); open(p,"wb").write(d.replace(a,b)) if a in d else (shutil.rmtree("/opt/runner-cache"), print("worker has no ACTIONS_RESULTS_URL: jobs here will use GitHub cache"))' /opt/runner-cache/bin/Runner.Worker.dll \
+ && { [ ! -d /opt/runner-cache ] || chown runner:runner /opt/runner-cache/bin/Runner.Worker.dll; }
 
 COPY entrypoint.sh /usr/local/bin/spareci-entrypoint
 RUN chmod 0755 /usr/local/bin/spareci-entrypoint

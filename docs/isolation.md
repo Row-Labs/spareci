@@ -1,6 +1,6 @@
 # Per-job isolation (design)
 
-Status: proposal. Nothing here is built yet except the job home (milestone 1).
+Status: proposal. Built so far: the job home (milestone 1), the backend interface (milestone 2, without the cache bind address) and Linux containers for private repos (part of milestone 3, see [linux-containers.md](linux-containers.md): Docker-API runtimes, socket passthrough rather than isolation, and the local cache on macOS only).
 
 ## Why
 
