@@ -26,8 +26,9 @@ jobs:
 
   # macOS, for the darwin-only code and for a repo split by OS (a Mac with
   # `spareci up --os macos`, Linux jobs elsewhere). It runs on a push only
-  # while a Mac serves macOS jobs, so it's free; without one it runs only
-  # when dispatched, on macos-15 at GitHub's macOS price.
+  # while a Mac serves macOS jobs; without one it runs only when dispatched,
+  # on macos-15 (free here, as this repo is public), so pushes don't wait
+  # on GitHub's macOS queue.
   test-macos:
     if: vars.SPARECI_RUNS_ON_MACOS != '' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ vars.SPARECI_RUNS_ON_MACOS || 'macos-15' }}
