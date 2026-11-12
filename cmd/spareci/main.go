@@ -251,7 +251,16 @@ func up(args []string) error {
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	soft, hard := stopOn(sigs, *o.drain, func() { os.Exit(1) })
 
-	host := &runner.Host{Root: runner.DefaultRoot(), Version: *version}
+	host := &runner.Host{Root: runner.DefaultRoot(), Repo: c.repo, Version: *version}
+	if !*dry {
+		// Before any cleanup: another repo's spareci starting now must see
+		// that this repo's jobs are live.
+		release, err := runner.Claim(host.Root, c.repo)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	if host.JobHome, err = runner.ResolveJobHome(*jobHome, host.Root, c.repo); err != nil {
 		return err
 	}

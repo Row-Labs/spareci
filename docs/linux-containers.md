@@ -4,7 +4,7 @@ A Mac takes Linux jobs as well as macOS ones: macOS jobs run natively as before,
 
 ## How a job runs
 
-1. **Prepare**, once per `spareci up` and architecture: check for a runtime, build the image if this version of it isn't there, and start the runner binary once in it to prove the platform works. Then remove containers and volumes a crash left behind.
+1. **Prepare**, once per `spareci up` and architecture: check for a runtime, build the image if this version of it isn't there, and start the runner binary once in it to prove the platform works. Then remove containers and volumes a crash left behind ([Several repos on one machine](how-it-works.md#several-repos-on-one-machine) says whose).
 2. **Per job**: write the JIT config and the job's environment to a `0600` env file (secrets stay off docker's command line), then `docker run` a container named after the runner. Its output is the runner's, parsed exactly as on the host. When the runner exits, the container (`docker rm -f -v`) and its work volume are removed.
 3. **Stop**: `docker stop` sends `SIGINT` (`--stop-signal`), which the runner treats as "finish up and deregister", then `SIGKILL` after 30 seconds (`--stop-timeout`). `tini -g` is PID 1, so the signal reaches the runner's whole process group. Nothing else signals the container: `docker run` has `--sig-proxy=false` and its own process group, so a `^C` meant for spareci (which drains) doesn't reach the job.
 

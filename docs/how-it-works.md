@@ -123,6 +123,10 @@ The pool asks the gate once per poll, before spawning (`internal/pool/gate.go`):
 
 The up process writes the gate's state to `<cache dir>/spareci/state/<owner>_<repo>.gate.json`, which `spareci status` reads while that process is alive.
 
+## Several repos on one machine
+
+Each repo gets its own `spareci up` (or service), and they share the cache root. On start, each removes what a crash left behind: runner copies in `<cache dir>/jobs/<owner>_<repo>/`, and job containers and volumes, which carry a `dev.spareci.repo` label. It removes its own repo's, and another repo's only when no spareci is running for that repo, so it never touches a live job of another repo. `spareci up` writes its pid to `<cache dir>/state/<owner>_<repo>.pid` while it runs, which is how the others tell (`internal/runner/owner.go`). Before 0.2 neither the label nor the per-repo directory existed, and start-up removed every repo's: a container without the label is removed only if it isn't running, and runner copies directly in `<cache dir>/jobs/` are left alone.
+
 ## Background service
 
 `spareci install` writes a launchd agent (`~/Library/LaunchAgents/dev.spareci.<owner>-<repo>.plist`) or a systemd user unit (`~/.config/systemd/user/spareci-<owner>-<repo>.service`) that runs `spareci up --repo owner/name` plus any flags given to `install`. It records the absolute path of the binary and the current `PATH`, so the service finds `gh`. It doesn't record tokens.

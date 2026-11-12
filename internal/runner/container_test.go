@@ -26,6 +26,8 @@ type fakeRuntime struct {
 	block   chan struct{} // if set, docker run waits for it (or a stop)
 	stopped chan struct{}
 	envFile string // contents of --env-file at run time
+	ps      string // docker ps output
+	volumes string // docker volume ls output
 }
 
 func newFakeRuntime() *fakeRuntime {
@@ -56,6 +58,12 @@ func (f *fakeRuntime) Output(ctx context.Context, stdin io.Reader, args ...strin
 		return nil, errors.New("Cannot connect to the Docker daemon")
 	}
 	switch args[0] {
+	case "ps":
+		return []byte(f.ps), nil
+	case "volume":
+		if args[1] == "ls" {
+			return []byte(f.volumes), nil
+		}
 	case "version":
 		return []byte(f.osName + "\n"), nil
 	case "info":
@@ -347,12 +355,78 @@ func TestContainerRunCancel(t *testing.T) {
 	}
 }
 
-func TestContainerPrune(t *testing.T) {
+// Two repos' spareci share a cache root. Starting one removes its own
+// leftovers and those of a repo no spareci is running for, but never the
+// other running spareci's jobs, nor a running job of a spareci before 0.2.
+func TestContainerPruneLeavesAnotherRunningReposJobs(t *testing.T) {
+	root := t.TempDir()
+	release, err := Claim(root, "o/live") // this process stands in for o/live's spareci
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	dead := filepath.Join(root, "state", RepoKey("o/dead")+".pid")
+	if err := os.WriteFile(dead, []byte("999999999\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	f := newFakeRuntime()
-	c := &Container{Root: "/cache/spareci", Docker: f}
+	f.ps = strings.Join([]string{
+		"mine\to/me\trunning",
+		"live\to/live\trunning",
+		"dead\to/dead\trunning",
+		"never\to/never\texited",
+		"oldrun\t\trunning",
+		"oldexit\t\texited",
+	}, "\n") + "\n"
+	f.volumes = "vmine\to/me\nvlive\to/live\nvdead\to/dead\nvold\t\n"
+	c := &Container{Root: root, Repo: "o/me", Docker: f}
 	c.Prune(context.Background())
-	if len(f.called("ps", "-aq", "--filter", "label=dev.spareci.root=/cache/spareci")) != 1 {
-		t.Errorf("calls = %v", f.calls)
+	rm := f.called("rm", "-f", "-v")
+	if len(rm) != 1 || strings.Join(rm[0][3:], " ") != "mine dead never oldexit" {
+		t.Errorf("removed containers %v", rm)
+	}
+	vrm := f.called("volume", "rm", "-f")
+	if len(vrm) != 1 || strings.Join(vrm[0][3:], " ") != "vmine vdead vold" {
+		t.Errorf("removed volumes %v", vrm)
+	}
+}
+
+func TestHostPruneLeavesAnotherRunningReposJobs(t *testing.T) {
+	root := t.TempDir()
+	release, err := Claim(root, "o/live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	jobs := filepath.Join(root, "jobs")
+	for _, d := range []string{"o_me/spareci-x-1-1", "o_live/spareci-x-1-2", "o_dead/spareci-x-1-3", "spareci-x-1-4"} {
+		if err := os.MkdirAll(filepath.Join(jobs, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	(&Host{Root: root, Repo: "o/me"}).Prune()
+	var left []string
+	entries, _ := os.ReadDir(jobs)
+	for _, e := range entries {
+		left = append(left, e.Name())
+	}
+	if got := strings.Join(left, " "); got != "o_live spareci-x-1-4" {
+		t.Errorf("left %s; want o_live (running) and spareci-x-1-4 (a spareci before 0.2)", got)
+	}
+}
+
+func TestClaimRelease(t *testing.T) {
+	root := t.TempDir()
+	release, err := Claim(root, "o/r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !live(root, RepoKey("o/r")) {
+		t.Fatal("claimed repo not live")
+	}
+	release()
+	if live(root, RepoKey("o/r")) {
+		t.Error("released repo still live")
 	}
 }
 
