@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Row-Labs/spareci/internal/gitmirror"
@@ -97,6 +98,9 @@ func (d DockerCLI) Output(ctx context.Context, stdin io.Reader, args ...string) 
 
 func (d DockerCLI) Stream(w io.Writer, args ...string) error {
 	cmd := exec.Command(d.bin(), args...)
+	// Its own process group: ^C in spareci's terminal is for spareci, which
+	// drains, and must not reach a job's container through the CLI.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout, cmd.Stderr = w, w
 	return cmd.Run()
 }
@@ -401,8 +405,9 @@ func (c *Container) runArgs(name, envFile, workVol string) []string {
 	args := []string{"run", "--name", name,
 		"--label", "dev.spareci.job=" + name, "--label", "dev.spareci.root=" + c.Root,
 		"--platform", platform(c.Target), "--pull", "never",
-		// The runner treats SIGINT as "finish up and deregister".
-		"--stop-signal", "SIGINT", "--stop-timeout", "30",
+		// The runner treats SIGINT as "finish up and deregister". Only
+		// docker stop sends it: a signal to the CLI isn't passed on.
+		"--stop-signal", "SIGINT", "--stop-timeout", "30", "--sig-proxy=false",
 		"--env-file", envFile,
 		"-v", c.ToolCacheVolume() + ":/opt/hostedtoolcache",
 	}

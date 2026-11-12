@@ -120,7 +120,7 @@ spareci estimate           # what your Actions minutes cost, and what this machi
 spareci stats              # what the jobs this machine ran would have cost on GitHub
 ```
 
-Press `^C` once and spareci routes new jobs back to GitHub, lets running jobs finish, and then sends any job still queued for this machine to GitHub-hosted runners. Press it twice and running jobs are aborted.
+Press `^C` once and spareci routes new jobs back to GitHub, sends jobs still queued for this machine to GitHub-hosted runners, and lets running jobs finish for up to `--drain-timeout` (default 10 minutes; `0` for no limit). Jobs still running after that, or when you press `^C` again, are stopped so GitHub marks them finished straight away, and their runs are re-run on GitHub-hosted runners. A third `^C` quits without cleaning up.
 
 ### What did it save?
 
@@ -210,10 +210,10 @@ A job is sent to a backend when its `runs-on` labels are all ones that backend's
 spareci install            # start `spareci up` for this repo now and at every login
 spareci install --max 2    # flags after install are passed to `up`
 spareci logs -f            # follow its log
-spareci uninstall          # stop it, route jobs back to GitHub, remove the service
+spareci uninstall          # stop it as ^C does, route jobs back to GitHub, remove the service
 ```
 
-On macOS this is a launchd agent in `~/Library/LaunchAgents`, on Linux a systemd user unit in `~/.config/systemd/user`. Either one restarts spareci within 10 seconds if it crashes or is killed. On a Linux server, run `loginctl enable-linger $USER` so it keeps running while you're logged out.
+On macOS this is a launchd agent in `~/Library/LaunchAgents`, on Linux a systemd user unit in `~/.config/systemd/user`. Either one restarts spareci within 10 seconds if it crashes or is killed. Stopping it never leaves a job stuck on GitHub: `spareci uninstall`, `spareci install` over a running service, `launchctl bootout` and `systemctl stop` all stop it the way `^C` does, giving running jobs up to `--drain-timeout` (`spareci uninstall --drain-timeout 30m` to wait longer) and showing its log meanwhile. On a Linux server, run `loginctl enable-linger $USER` so it keeps running while you're logged out.
 
 ### When this machine goes away
 

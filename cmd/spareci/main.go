@@ -39,8 +39,9 @@ Usage:
                     [--dry-run] [--cache=true] [--cache-size 10GB]
                     [--job-home spareci|user|PATH] [--git-mirror=true]
                     [--only-on-ac] [--idle 10m] [--hours 18:00-08:00]
+                    [--drain-timeout 10m]
   spareci install   [--repo owner/name] [up flags]   run "up" in the background, at login
-  spareci uninstall [--repo owner/name]
+  spareci uninstall [--repo owner/name] [--drain-timeout 10m]
   spareci logs      [--repo owner/name] [-f] [-n 50]
   spareci watchdog  [--setup [--force]]   print the workflow that reroutes jobs if this
                     machine dies; --setup also creates the app it uses to write variables
@@ -157,6 +158,7 @@ type upOpts struct {
 	gitMirror *bool
 	linux     linuxOpts
 	laptop    *laptopOpts
+	drain     *time.Duration
 }
 
 // upFlags defines up's flags; install checks its pass-through flags with it.
@@ -183,7 +185,44 @@ func upFlags(fs *flag.FlagSet) *upOpts {
 			docker: fs.String("linux-docker", runner.DockerSocket, `docker for Linux jobs: "socket" (the runtime's socket; jobs control it, no isolation) or "none"`),
 		},
 		laptop: laptopFlags(fs),
+		drain:  fs.Duration("drain-timeout", defaultDrain, "on ^C or SIGTERM, how long running jobs get to finish before they're stopped and re-run on GitHub-hosted runners (0: no limit)"),
 	}
+}
+
+const defaultDrain = 10 * time.Minute
+
+// stopOn turns signals (^C, or SIGTERM from a service manager) into the
+// stages of stopping. The first cancels soft: stop taking jobs, route back
+// to GitHub, let running jobs finish. hard is cancelled drain later, or on a
+// second signal: stop running jobs and re-run them on GitHub-hosted runners
+// (pool.Pool.drain). A third signal calls quit.
+func stopOn(sigs <-chan os.Signal, drain time.Duration, quit func()) (soft, hard context.Context) {
+	soft, softCancel := context.WithCancel(context.Background())
+	hard, hardCancel := context.WithCancel(context.Background())
+	go func() {
+		<-sigs
+		if drain > 0 {
+			slog.Info("shutting down: running jobs get until the drain timeout to finish", "drain_timeout", drain)
+			t := time.AfterFunc(drain, func() {
+				slog.Info("drain timeout reached", "drain_timeout", drain)
+				hardCancel()
+			})
+			defer t.Stop()
+		} else {
+			slog.Info("shutting down")
+		}
+		softCancel()
+		select {
+		case <-sigs:
+			slog.Info("stopping running jobs now")
+			hardCancel()
+		case <-hard.Done():
+		}
+		<-sigs
+		slog.Info("quitting without cleaning up")
+		quit()
+	}()
+	return soft, hard
 }
 
 func up(args []string) error {
@@ -208,20 +247,9 @@ func up(args []string) error {
 		return err
 	}
 
-	// First ^C: stop taking jobs, route back to GitHub, let running jobs end.
-	// Second ^C: abort them.
-	soft, softCancel := context.WithCancel(context.Background())
-	hard, hardCancel := context.WithCancel(context.Background())
-	sigs := make(chan os.Signal, 2)
+	sigs := make(chan os.Signal, 3)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-sigs
-		slog.Info("shutting down")
-		softCancel()
-		<-sigs
-		slog.Info("aborting running jobs")
-		hardCancel()
-	}()
+	soft, hard := stopOn(sigs, *o.drain, func() { os.Exit(1) })
 
 	host := &runner.Host{Root: runner.DefaultRoot(), Version: *version}
 	if host.JobHome, err = runner.ResolveJobHome(*jobHome, host.Root, c.repo); err != nil {
@@ -338,9 +366,14 @@ func down(args []string) error {
 }
 
 // routeBack clears every routing variable, sends jobs routed to spareci and
-// still queued to GitHub-hosted runners, and removes runner registrations
+// still queued to GitHub-hosted runners, re-runs jobs left in progress on
+// this machine's runners that are gone, and removes runner registrations
 // left behind by a crash.
 func routeBack(ctx context.Context, client *gh.Client, c *common) error {
+	runners, err := client.ListRunners(ctx, c.repo)
+	if err != nil {
+		return err
+	}
 	r := c.router(client, route.Targets)
 	if r.Enabled() {
 		if err := r.Stop(ctx); err != nil {
@@ -354,10 +387,16 @@ func routeBack(ctx context.Context, client *gh.Client, c *common) error {
 		if err != nil {
 			return err
 		}
-	}
-	runners, err := client.ListRunners(ctx, c.repo)
-	if err != nil {
-		return err
+		runs, err := strandedRuns(ctx, client, c.repo, runners)
+		if err != nil {
+			return err
+		}
+		if len(runs) > 0 {
+			fmt.Printf("cancelling %d run(s) with a job left in progress on a runner of this machine that's gone, and re-running them on GitHub-hosted runners\n", len(runs))
+			if _, err := pool.RescueRuns(ctx, r, runs); err != nil {
+				return err
+			}
+		}
 	}
 	for _, r := range runners {
 		// Only this machine's: another machine's runner is offline for its
@@ -370,6 +409,35 @@ func routeBack(ctx context.Context, client *gh.Client, c *common) error {
 		}
 	}
 	return nil
+}
+
+// strandedRuns are runs with a job in progress on one of this machine's
+// runners that is offline or no longer registered: spareci was killed
+// before it could stop the runner, and GitHub would keep the job in
+// progress for minutes.
+func strandedRuns(ctx context.Context, client *gh.Client, repo string, runners []gh.Runner) ([]int64, error) {
+	online := map[string]bool{}
+	for _, r := range runners {
+		online[r.Name] = r.Status != "offline"
+	}
+	runs, err := client.ListRuns(ctx, repo, "in_progress")
+	if err != nil {
+		return nil, err
+	}
+	var out []int64
+	for _, run := range runs {
+		jobs, err := client.RunJobs(ctx, repo, run.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, j := range jobs {
+			if j.Status == "in_progress" && strings.HasPrefix(j.RunnerName, pool.RunnerPrefix()) && !online[j.RunnerName] {
+				out = append(out, run.ID)
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 func cacheDir() string { return filepath.Join(runner.DefaultRoot(), "actions-cache") }
@@ -463,8 +531,11 @@ func install(args []string) error {
 		Args: append([]string{"up", "--repo", c.repo}, rest...),
 		Env:  map[string]string{"PATH": os.Getenv("PATH")}, // so the service finds gh
 		Log:  logPath(c.repo),
+		// The service manager lets spareci drain before killing it.
+		Drain:     *checked.drain,
+		StopAfter: pool.StopAfterDrain,
 	}
-	path, err := service.Install(spec)
+	path, err := service.Install(spec, os.Stdout)
 	if err != nil {
 		return err
 	}
@@ -480,8 +551,14 @@ func install(args []string) error {
 func uninstall(args []string) error {
 	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
 	c := commonFlags(fs)
+	drain := fs.Duration("drain-timeout", defaultDrain, "how long running jobs get to finish before they're stopped and re-run on GitHub-hosted runners (0: no limit)")
 	_ = fs.Parse(args)
 	if err := c.resolve(); err != nil {
+		return err
+	}
+	// Stop it as ^C does, so no job is left in progress on a runner that's
+	// gone; the service manager would kill it after its stop timeout.
+	if err := service.Stop(c.repo, *drain, pool.StopAfterDrain, logPath(c.repo), os.Stdout); err != nil {
 		return err
 	}
 	found, err := service.Uninstall(c.repo)

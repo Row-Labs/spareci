@@ -54,6 +54,7 @@ type Router struct {
 
 	Poll       time.Duration // how often a rescue checks progress; default 3s
 	CancelWait time.Duration // how long a cancel may take before force-cancelling; default 1m
+	RerunWait  time.Duration // how long to retry a re-run GitHub refuses as "already running"; default 3m
 
 	mu       sync.Mutex // held while the routing variable is being changed
 	on       bool       // routing is wanted (between Start and Stop)
@@ -251,9 +252,9 @@ func (r *Router) Rescue(ctx context.Context, runID int64, force bool) error {
 		}
 	}
 	if whole {
-		err = r.API.RerunRun(ctx, r.Repo, runID)
+		err = r.rerun(ctx, runID, r.API.RerunRun)
 	} else {
-		err = r.API.RerunFailedJobs(ctx, r.Repo, runID)
+		err = r.rerun(ctx, runID, r.API.RerunFailedJobs)
 	}
 	var next gh.Run
 	if err == nil {
@@ -268,7 +269,7 @@ func (r *Router) Rescue(ctx context.Context, runID int64, force bool) error {
 			slog.Warn("re-run skipped a cancelled job; re-running the whole run", "run", runID, "job", left)
 			err = r.cancel(ctx, runID)
 			if err == nil {
-				err = r.API.RerunRun(ctx, r.Repo, runID)
+				err = r.rerun(ctx, runID, r.API.RerunRun)
 			}
 			if err == nil {
 				_, err = r.waitAttempt(ctx, runID, next.RunAttempt)
@@ -284,6 +285,41 @@ func (r *Router) Rescue(ctx context.Context, runID int64, force bool) error {
 		return fmt.Errorf("re-run: %w", err)
 	}
 	return nil
+}
+
+// rerun calls a re-run endpoint. GitHub refuses a re-run with "This
+// workflow is already running" (403) until every job of the cancelled
+// attempt has completed, which can lag the run's own status, and for longer
+// when a job's runner went away. So on that refusal it waits for the run to
+// complete and tries again, for up to RerunWait.
+func (r *Router) rerun(ctx context.Context, runID int64, fn func(context.Context, string, int64) error) error {
+	limit := r.RerunWait
+	if limit == 0 {
+		limit = 3 * time.Minute
+	}
+	deadline := time.Now().Add(limit)
+	for {
+		err := fn(ctx, r.Repo, runID)
+		if !AlreadyRunning(err) || time.Now().After(deadline) {
+			return err
+		}
+		slog.Debug("re-run refused while the run is still running; waiting", "run", runID)
+		if werr := r.waitCompleted(ctx, runID, time.Until(deadline)); werr != nil {
+			return errors.Join(err, werr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(r.poll()):
+		}
+	}
+}
+
+// AlreadyRunning reports whether GitHub refused a re-run because the run
+// hasn't finished.
+func AlreadyRunning(err error) bool {
+	var ae *gh.APIError
+	return errors.As(err, &ae) && ae.Status == 403 && strings.Contains(strings.ToLower(ae.Body), "already running")
 }
 
 // ranHere reports whether a job was routed to this machine.
@@ -311,7 +347,8 @@ func (r *Router) cancel(ctx context.Context, runID int64) error {
 		if err := r.API.ForceCancelRun(ctx, r.Repo, runID); err != nil && !gh.IsStatus(err, 409) {
 			return fmt.Errorf("force-cancel run: %w", err)
 		}
-		return r.waitCompleted(ctx, runID, time.Minute)
+		// That can take minutes to settle too (Row-Labs/relay, 2026-11-11).
+		return r.waitCompleted(ctx, runID, 3*time.Minute)
 	}
 	return nil
 }
