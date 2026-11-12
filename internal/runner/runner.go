@@ -23,6 +23,7 @@ import (
 
 type Host struct {
 	Root    string // cache root: runner installs, job dirs, logs, shared tool cache
+	Repo    string // owner/name; job dirs are kept per repo (see owner.go)
 	Version string
 	// JobHome is the HOME jobs run with (see ResolveJobHome and JobEnv).
 	// Empty: the user's own home and environment.
@@ -67,7 +68,7 @@ func DefaultRoot() string {
 }
 
 func (h *Host) installDir() string { return filepath.Join(h.Root, "runner", h.Version) }
-func (h *Host) jobsDir() string    { return filepath.Join(h.Root, "jobs") }
+func (h *Host) jobsDir() string    { return JobsDir(h.Root, h.Repo) }
 func (h *Host) LogsDir() string    { return filepath.Join(h.Root, "logs") }
 
 // ToolCache persists across jobs, so setup-node, setup-python and friends
@@ -125,11 +126,36 @@ func (h *Host) Install(ctx context.Context) error {
 	return os.Rename(tmp, dir)
 }
 
-// Prune removes job directories left behind by a crash.
+// JobsDir holds a repo's runner copies and container env files, one per job.
+func JobsDir(root, repo string) string {
+	if repo == "" {
+		return filepath.Join(root, "jobs")
+	}
+	return filepath.Join(root, "jobs", RepoKey(repo))
+}
+
+// Prune removes job directories left behind by a crash: this repo's, and
+// those of repos no spareci is running for. Job directories directly in
+// <root>/jobs are from a spareci before 0.2, which may still be running
+// jobs there, so they're left alone.
 func (h *Host) Prune() {
-	entries, _ := os.ReadDir(h.jobsDir())
+	if h.Repo == "" {
+		entries, _ := os.ReadDir(h.jobsDir())
+		for _, e := range entries {
+			_ = os.RemoveAll(filepath.Join(h.jobsDir(), e.Name()))
+		}
+		return
+	}
+	all := filepath.Join(h.Root, "jobs")
+	entries, _ := os.ReadDir(all)
 	for _, e := range entries {
-		_ = os.RemoveAll(filepath.Join(h.jobsDir(), e.Name()))
+		key := e.Name()
+		if !e.IsDir() || strings.HasPrefix(key, "spareci-") {
+			continue // a job of a spareci before 0.2
+		}
+		if key == RepoKey(h.Repo) || !live(h.Root, key) {
+			_ = os.RemoveAll(filepath.Join(all, key))
+		}
 	}
 }
 

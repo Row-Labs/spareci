@@ -7,7 +7,7 @@
 | `cmd/spareci` | CLI: flags, signals, wiring |
 | `internal/gh` | The few GitHub REST calls needed: queued jobs, JIT runners, repo variables, run history |
 | `internal/gate` | Laptop mode: whether the machine takes jobs now (power, user idle time, hours) |
-| `internal/pool` | Poll loop: matches queued jobs to backends, decides which runners to start, applies `--max-wait`, drains on shutdown |
+| `internal/pool` | Poll loop: matches queued jobs to backends, decides which runners to start, applies `--max-wait`, drains on shutdown ([Stopping](#stopping)) |
 | `internal/route` | Routing variables (one per kind of job) and heartbeat, sending queued jobs back to GitHub, the watchdog workflow |
 | `internal/ghapp` | `spareci watchdog --setup`: creates the watchdog's GitHub App through the manifest flow and stores its secrets |
 | `internal/service` | `spareci install`: launchd agent (macOS), systemd user unit (Linux) |
@@ -37,7 +37,7 @@ Each kind of job has its own variable and label, named after the GitHub-hosted r
 | `SPARECI_RUNS_ON_LINUX_ARM` | `spareci-linux-arm` | `ubuntu-*-arm`: arm64 |
 | `SPARECI_RUNS_ON` (deprecated) | `spareci` | anything, from spareci 0.1 |
 
-On start, `pool.Assign` gives each backend the kinds of jobs it takes: macOS to a macOS backend, Linux arm64 to an arm64 Linux backend, Linux x64 to an x64 one, or to the arm64 one with `--linux-x64-on-arm` (the default; on a Mac no x64 container backend is made then). A kind already taken goes to the first backend that took it. The deprecated `SPARECI_RUNS_ON` goes to the backend for the host's own OS and architecture, which is what it meant in 0.1. spareci then sets the variable for each kind it takes to its label, so `runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-24.04' }}` resolves to this machine only while something here runs Linux x64 jobs. A variable for a kind this machine doesn't take is left alone, so a Mac without a container runtime never pulls Linux jobs in. On `^C` it deletes its variables first, so new runs go to GitHub, waits for running jobs, then sends jobs still queued here back to GitHub (below).
+On start, `pool.Assign` gives each backend the kinds of jobs it takes: macOS to a macOS backend, Linux arm64 to an arm64 Linux backend, Linux x64 to an x64 one, or to the arm64 one with `--linux-x64-on-arm` (the default; on a Mac no x64 container backend is made then). A kind already taken goes to the first backend that took it. The deprecated `SPARECI_RUNS_ON` goes to the backend for the host's own OS and architecture, which is what it meant in 0.1. spareci then sets the variable for each kind it takes to its label, so `runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-24.04' }}` resolves to this machine only while something here runs Linux x64 jobs. A variable for a kind this machine doesn't take is left alone, so a Mac without a container runtime never pulls Linux jobs in. On `^C` it deletes its variables first, so new runs go to GitHub, sends jobs still queued here back to GitHub (below), and waits for running jobs ([Stopping](#stopping)).
 
 Why per OS, and why architecture only for Linux: one variable meant a Linux job opted in on a Mac ran on macOS, and a Mac with containers needs to say separately whether it takes Linux jobs. `ubuntu-24.04` and `ubuntu-24.04-arm` are GitHub's own split, so the variable follows the fallback label and the workflow change stays one line. macOS has one variable because a Mac runs one architecture natively and Intel `macos-13` jobs are rare; `spareci init` marks them "maybe" on Apple Silicon.
 
@@ -57,7 +57,7 @@ Every variable shares one heartbeat (`SPARECI_HEARTBEAT`), and they go on and of
 This happens in three places:
 
 - **`--max-wait`** (default 10m). A job queued here for longer, while a backend it fits is full, is sent back. A full Linux backend doesn't make macOS jobs wait, or the other way round. A run with a job in progress is left alone until that job ends, so cancelling doesn't throw away work.
-- **Shutdown** (`^C`, `spareci down`, `spareci uninstall`). Every run with a job queued here is sent back, even if other jobs in it are running.
+- **Shutdown** (`^C`, SIGTERM, `spareci uninstall`, `spareci down`). While running jobs drain, a run with a job queued here is sent back as soon as no job in it is in progress. When the drain ends, every run with a job still queued here is sent back, even if other jobs in it are running, and so is every run whose job was stopped ([Stopping](#stopping)). `spareci down` and `uninstall` also re-run any run with a job still in progress on one of this machine's runners that is offline or gone, which is what a killed spareci leaves behind.
 - **The watchdog workflow**, when the daemon is dead.
 
 ### Crash-safe routing
@@ -123,13 +123,32 @@ The pool asks the gate once per poll, before spawning (`internal/pool/gate.go`):
 
 The up process writes the gate's state to `<cache dir>/spareci/state/<owner>_<repo>.gate.json`, which `spareci status` reads while that process is alive.
 
+## Several repos on one machine
+
+Each repo gets its own `spareci up` (or service), and they share the cache root. On start, each removes what a crash left behind: runner copies in `<cache dir>/jobs/<owner>_<repo>/`, and job containers and volumes, which carry a `dev.spareci.repo` label. It removes its own repo's, and another repo's only when no spareci is running for that repo, so it never touches a live job of another repo. `spareci up` writes its pid to `<cache dir>/state/<owner>_<repo>.pid` while it runs, which is how the others tell (`internal/runner/owner.go`). Before 0.2 neither the label nor the per-repo directory existed, and start-up removed every repo's: a container without the label is removed only if it isn't running, and runner copies directly in `<cache dir>/jobs/` are left alone.
+
 ## Background service
 
 `spareci install` writes a launchd agent (`~/Library/LaunchAgents/dev.spareci.<owner>-<repo>.plist`) or a systemd user unit (`~/.config/systemd/user/spareci-<owner>-<repo>.service`) that runs `spareci up --repo owner/name` plus any flags given to `install`. It records the absolute path of the binary and the current `PATH`, so the service finds `gh`. It doesn't record tokens.
 
 - Restarts: launchd `KeepAlive: {SuccessfulExit: false}`, systemd `Restart=on-failure`, each after 10 seconds. A crash or `kill -9` is restarted. A clean stop is not: SIGTERM from `launchctl bootout` or `systemctl stop` is handled like `^C`, and spareci exits 0.
+- Stop timeout: launchd `ExitTimeOut` and systemd `TimeoutStopSec` are `--drain-timeout` plus 5 minutes (`pool.StopAfterDrain`), so the service manager doesn't kill spareci while it drains ([Stopping](#stopping)); with `--drain-timeout 0` they are unlimited. systemd has `KillMode=mixed`, so its SIGTERM goes to spareci alone: by default it goes to every process in the unit, and a runner that gets SIGTERM cancels its job at once.
 - Logs: stdout and stderr are appended to `<cache dir>/service/spareci-<owner>-<repo>.log`. `spareci logs [-f]` tails it.
-- `spareci uninstall` stops the service, deletes the file, and then does what `spareci down` does, in case the service was already dead.
+- `spareci uninstall [--drain-timeout 10m]` stops a running service itself rather than through the service manager (`service.Stop`): SIGTERM to its process (from `launchctl print` or `systemctl show -p MainPID`), then a second SIGTERM if jobs are still running after the drain timeout, printing the service's log lines as they're written. spareci exits 0, so it isn't restarted. Then it removes the service and does what `spareci down` does, in case the service was already dead. `spareci install` over a running service stops it the same way first.
+
+## Stopping
+
+Stopping spareci, by `^C`, SIGTERM from a service manager, `spareci uninstall` or a reinstall, never leaves a job stranded on GitHub (`pool.Pool.drain`):
+
+1. Routing goes off, so new runs go to GitHub-hosted runners, and runners that haven't taken a job are stopped.
+2. Runs with a job queued here are sent back to GitHub at once, unless a job in the run is in progress: cancelling would throw that work away, so they're retried every 5 seconds and go back when it ends.
+3. Running jobs get up to `--drain-timeout` (default 10 minutes) to finish.
+4. After that, or on a second `^C`, every runner is stopped with SIGINT (`docker stop` for a container). The runner cancels its job and reports it before exiting, so GitHub marks the job completed within seconds. A killed runner can't report anything: GitHub keeps its job in progress until it notices the runner is gone, which took several minutes on 2026-11-11 (Row-Labs/relay, when the service was stopped by `launchctl bootout` and killed after a 60-second `ExitTimeOut`), and a cancel or re-run of the run waits on it ("This workflow is already running"). Measured on 2026-11-11 (Row-Labs/spareci run 43126229214, `spareci uninstall --drain-timeout 1s` with two Linux container jobs running): GitHub showed both jobs completed within 4 seconds of the SIGINT, the run completed 4 seconds later, and its re-run was queued on `ubuntu-24.04` 3 seconds after that; the uninstall took 19 seconds. Cancelling the run through the API while its runners were alive was no faster (5 seconds, run 43126404180), and it only works while the runner is alive to hear it, so spareci uses SIGINT and then cancels and re-runs. Before stopping the runners, spareci notes each job's run, by the job's name from the last poll when that's unambiguous and otherwise by looking up which job lists the runner's name.
+5. Those runs are cancelled and re-run on GitHub-hosted runners (`Router.Rescue` with force, as for queued jobs), and jobs still queued here are sent back. A re-run GitHub refuses as "already running" is retried while the run finishes cancelling, for up to 3 minutes.
+
+Steps 4 and 5 take at most 5 minutes (`pool.StopAfterDrain`: 75 seconds for runners to stop, the rest for re-runs), which is what the service's stop timeout adds to the drain timeout. A third `^C` quits at once.
+
+Rebooting or logging out isn't covered: the system signals every process, runners included, and doesn't wait for the drain. Jobs running then end cancelled or failed, and their runs aren't re-run automatically. Jobs still queued here are re-run by the watchdog.
 
 ## spareci init
 

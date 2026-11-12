@@ -234,7 +234,7 @@ func TestRanJobIsNotQueuedAgain(t *testing.T) {
 	build := gh.Job{ID: 11, RunID: 1, Name: "build", Labels: []string{"spareci"}, CreatedAt: now}
 	test := gh.Job{ID: 12, RunID: 1, Name: "test", Labels: []string{"spareci"}, CreatedAt: now}
 	p.queued = []gh.Job{build, test}
-	p.claim(mac, "build", now)
+	p.claim(&worker{backend: mac}, "build", now)
 
 	// Minutes later: the runner is gone, but GitHub still lists build.
 	later := now.Add(3 * time.Minute)
@@ -263,18 +263,19 @@ func TestClaimOnlyWhenUnambiguous(t *testing.T) {
 		{ID: 23, RunID: 3, Name: "lint", Labels: []string{"spareci-linux"}},
 		{ID: 24, RunID: 3, Name: "lint", Labels: []string{"spareci-macos"}},
 	}
-	p.claim(mac, "build", now)
+	p.claim(&worker{backend: mac}, "build", now)
 	if len(p.ran) != 0 {
 		t.Errorf("claimed %v from two candidates", p.ran)
 	}
 	// Two jobs named lint, but only one fits the Linux backend.
-	p.claim(linux, "lint", now)
-	if len(p.ran) != 1 || p.ran[23].IsZero() {
-		t.Errorf("ran = %v, want only 23", p.ran)
+	w := &worker{backend: linux}
+	p.claim(w, "lint", now)
+	if len(p.ran) != 1 || p.ran[23].IsZero() || w.runID != 3 {
+		t.Errorf("ran = %v, run %d; want only 23, in run 3", p.ran, w.runID)
 	}
 	// A second runner taking another "lint" can't claim 23 again; 24 doesn't
 	// fit Linux, so nothing.
-	p.claim(linux, "lint", now)
+	p.claim(&worker{backend: linux}, "lint", now)
 	if len(p.ran) != 1 {
 		t.Errorf("ran = %v", p.ran)
 	}

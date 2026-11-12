@@ -176,7 +176,7 @@ func TestGatePausesAndResumes(t *testing.T) {
 	// Unplug: routing and heartbeat cleared, idle runner stopped, busy one
 	// left alone, and the job queued here is re-run on GitHub.
 	g.set(false, "on battery")
-	if err := p.tick(ctx, ctx); err != nil {
+	if err := p.tick(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if v := fg.get("SPARECI_RUNS_ON"); v != "" {
@@ -195,7 +195,7 @@ func TestGatePausesAndResumes(t *testing.T) {
 	})
 	// Replug: routing and heartbeat back on.
 	g.set(true, "")
-	p.tick(ctx, ctx)
+	p.tick(ctx)
 	if v := fg.get("SPARECI_RUNS_ON"); v != "spareci" {
 		t.Errorf("SPARECI_RUNS_ON = %q after resume, want spareci", v)
 	}
@@ -214,7 +214,7 @@ func TestGatePauseLeavesBusyRunAlone(t *testing.T) {
 	ctx := context.Background()
 
 	p.routed = true
-	p.tick(ctx, ctx)
+	p.tick(ctx)
 	time.Sleep(100 * time.Millisecond) // let the background rescue run
 	for _, c := range fg.log() {
 		if c == "cancel" || c == "rerun" {
@@ -223,7 +223,7 @@ func TestGatePauseLeavesBusyRunAlone(t *testing.T) {
 	}
 	// Once that job ends, the next poll sends the queued one back.
 	fg.set(func(f *fakeGitHub) { f.busy = false })
-	p.tick(ctx, ctx)
+	p.tick(ctx)
 	waitFor(t, "rescue after busy job ended", func() bool {
 		var q string
 		fg.set(func(f *fakeGitHub) { q = f.queuedFor })
@@ -265,7 +265,7 @@ func TestGateRoutingFailureRetries(t *testing.T) {
 	p.routed = true
 	ctx := context.Background()
 
-	p.tick(ctx, ctx)
+	p.tick(ctx)
 	if !p.routed {
 		t.Fatal("routed flipped despite the API failing")
 	}
@@ -275,7 +275,7 @@ func TestGateRoutingFailureRetries(t *testing.T) {
 		}
 	}
 	fg.set(func(f *fakeGitHub) { f.failVar = false })
-	p.tick(ctx, ctx)
+	p.tick(ctx)
 	if v := fg.get("SPARECI_RUNS_ON"); v != "" || p.routed {
 		t.Errorf("retry didn't clear routing: variable=%q routed=%v", v, p.routed)
 	}

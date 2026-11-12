@@ -22,6 +22,7 @@ type fake struct {
 	jobs    []gh.Job
 	calls   []string
 	stuck   bool   // ignore normal cancel, like a run held by a dead runner
+	lag     int    // re-runs refused as "already running" after the run completed
 	skip    string // a job a failed-jobs re-run leaves out, as GitHub once did
 	routing string // routing variables set when the re-run was created
 	clock   time.Time
@@ -95,8 +96,10 @@ func (f *fake) ForceCancelRun(context.Context, string, int64) error {
 func (f *fake) rerun(kind string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.run.Status != "completed" {
-		return errors.New("run not completed")
+	if f.run.Status != "completed" || f.lag > 0 {
+		f.lag--
+		f.log(kind + " refused")
+		return &gh.APIError{Status: 403, Body: `{"message":"This workflow is already running"}`}
 	}
 	f.log(kind)
 	f.routing = ""
@@ -465,5 +468,30 @@ func TestWatchdogGolden(t *testing.T) {
 	}
 	if got := Watchdog(Vars(DefaultBase), "SPARECI_HEARTBEAT"); got != string(want) {
 		t.Errorf("watchdog workflow differs from testdata/spareci-watchdog.yml; regenerate it and check it with Prettier")
+	}
+}
+
+func TestRescueRetriesAReRunRefusedAsAlreadyRunning(t *testing.T) {
+	f := newFake()
+	f.jobs = []gh.Job{{Name: "test", Status: "queued", Labels: []string{"spareci"}}}
+	f.lag = 2 // GitHub's jobs lag the run's completed status
+	r := router(f)
+	if err := r.Rescue(context.Background(), 7, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.calls, ","); got != "cancel,rerun-failed refused,rerun-failed refused,rerun-failed" {
+		t.Errorf("calls %s", got)
+	}
+}
+
+func TestRescueGivesUpOnAReRunThatStaysRefused(t *testing.T) {
+	f := newFake()
+	f.jobs = []gh.Job{{Name: "test", Status: "queued", Labels: []string{"spareci"}}}
+	f.lag = 1 << 30
+	r := router(f)
+	r.RerunWait = 20 * time.Millisecond
+	err := r.Rescue(context.Background(), 7, false)
+	if !AlreadyRunning(err) {
+		t.Fatalf("err %v, want already running", err)
 	}
 }

@@ -5,14 +5,16 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 var spec = Spec{
-	Repo: "Row-Labs/spareci",
-	Exec: "/Users/me/go/bin/spareci",
-	Args: []string{"up", "--repo", "Row-Labs/spareci", "--label", "a&b", "--max-wait", "15m"},
-	Env:  map[string]string{"PATH": "/opt/homebrew/bin:/usr/bin", "B": "50% $off"},
-	Log:  "/Users/me/Library/Caches/spareci/service/spareci-row-labs-spareci.log",
+	Repo:  "Row-Labs/spareci",
+	Exec:  "/Users/me/go/bin/spareci",
+	Args:  []string{"up", "--repo", "Row-Labs/spareci", "--label", "a&b", "--max-wait", "15m"},
+	Env:   map[string]string{"PATH": "/opt/homebrew/bin:/usr/bin", "B": "50% $off"},
+	Log:   "/Users/me/Library/Caches/spareci/service/spareci-row-labs-spareci.log",
+	Drain: 10 * time.Minute, StopAfter: 5 * time.Minute,
 }
 
 func TestName(t *testing.T) {
@@ -53,6 +55,8 @@ func TestPlistIsValidXMLWithRestartOnFailure(t *testing.T) {
 		"<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>",
 		"<key>RunAtLoad</key>\n\t<true/>",
 		"<string>a&amp;b</string>",
+		// launchd waits out the drain before it SIGKILLs spareci.
+		"<key>ExitTimeOut</key>\n\t<integer>900</integer>",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("plist missing %q:\n%s", want, p)
@@ -67,6 +71,8 @@ func TestUnit(t *testing.T) {
 		`Environment="B=50%% $$off"`,
 		`Environment="PATH=/opt/homebrew/bin:/usr/bin"`,
 		"Restart=on-failure",
+		"KillMode=mixed", // SIGTERM to spareci only, so runners drain
+		"TimeoutStopSec=900s",
 		"StandardOutput=append:" + spec.Log,
 		"WantedBy=default.target",
 	} {
@@ -98,5 +104,16 @@ func TestRepoArgReadsBackBothFormats(t *testing.T) {
 	}
 	if got := repoArg(Unit(spec)); got != "Row-Labs/spareci" {
 		t.Errorf("unit: %q", got)
+	}
+}
+
+func TestNoDrainLimitMeansNoStopTimeout(t *testing.T) {
+	s := spec
+	s.Drain = 0
+	if !strings.Contains(Plist(s), "<key>ExitTimeOut</key>\n\t<integer>0</integer>") {
+		t.Error("plist: want ExitTimeOut 0 (no limit)")
+	}
+	if !strings.Contains(Unit(s), "TimeoutStopSec=infinity") {
+		t.Error("unit: want TimeoutStopSec=infinity")
 	}
 }

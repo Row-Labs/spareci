@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Row-Labs/spareci/internal/gitmirror"
@@ -97,6 +98,9 @@ func (d DockerCLI) Output(ctx context.Context, stdin io.Reader, args ...string) 
 
 func (d DockerCLI) Stream(w io.Writer, args ...string) error {
 	cmd := exec.Command(d.bin(), args...)
+	// Its own process group: ^C in spareci's terminal is for spareci, which
+	// drains, and must not reach a job's container through the CLI.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout, cmd.Stderr = w, w
 	return cmd.Run()
 }
@@ -314,17 +318,36 @@ func (c *Container) pruneImages(ctx context.Context, keep string) {
 	}
 }
 
-// Prune removes containers and work volumes a crash left behind.
+// Prune removes job containers and work volumes a crash left behind: this
+// repo's, another repo's when no spareci is running for it, and stopped
+// ones from a spareci before 0.2, which didn't label the repo (owner.go).
+// Another running spareci's jobs are never touched.
 func (c *Container) Prune(ctx context.Context) {
 	d := c.docker()
 	filter := "label=dev.spareci.root=" + c.Root
-	if out, err := d.Output(ctx, nil, "ps", "-aq", "--filter", filter); err == nil {
-		if ids := strings.Fields(string(out)); len(ids) > 0 {
+	if out, err := d.Output(ctx, nil, "ps", "-a", "--filter", filter, "--format", "{{.ID}}\t{{.Label \"dev.spareci.repo\"}}\t{{.State}}"); err == nil {
+		var ids []string
+		for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+			f := strings.Split(line, "\t")
+			if len(f) == 3 && leftover(c.Root, c.Repo, f[1], f[2] == "running") {
+				ids = append(ids, f[0])
+			}
+		}
+		if len(ids) > 0 {
 			_, _ = d.Output(ctx, nil, append([]string{"rm", "-f", "-v"}, ids...)...)
 		}
 	}
-	if out, err := d.Output(ctx, nil, "volume", "ls", "-q", "--filter", filter, "--filter", "label=dev.spareci.job"); err == nil {
-		if names := strings.Fields(string(out)); len(names) > 0 {
+	// A volume in use by a container can't be removed, so one with an
+	// unknown owner counts as not running: if it's in use, rm fails.
+	if out, err := d.Output(ctx, nil, "volume", "ls", "--filter", filter, "--filter", "label=dev.spareci.job", "--format", "{{.Name}}\t{{.Label \"dev.spareci.repo\"}}"); err == nil {
+		var names []string
+		for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+			f := strings.Split(line, "\t")
+			if len(f) == 2 && leftover(c.Root, c.Repo, f[1], false) {
+				names = append(names, f[0])
+			}
+		}
+		if len(names) > 0 {
 			_, _ = d.Output(ctx, nil, append([]string{"volume", "rm", "-f"}, names...)...)
 		}
 	}
@@ -399,10 +422,11 @@ func containerEnv(env []string, goos string) []string {
 // runArgs are the docker run arguments for one job.
 func (c *Container) runArgs(name, envFile, workVol string) []string {
 	args := []string{"run", "--name", name,
-		"--label", "dev.spareci.job=" + name, "--label", "dev.spareci.root=" + c.Root,
+		"--label", "dev.spareci.job=" + name, "--label", "dev.spareci.root=" + c.Root, "--label", "dev.spareci.repo=" + c.Repo,
 		"--platform", platform(c.Target), "--pull", "never",
-		// The runner treats SIGINT as "finish up and deregister".
-		"--stop-signal", "SIGINT", "--stop-timeout", "30",
+		// The runner treats SIGINT as "finish up and deregister". Only
+		// docker stop sends it: a signal to the CLI isn't passed on.
+		"--stop-signal", "SIGINT", "--stop-timeout", "30", "--sig-proxy=false",
 		"--env-file", envFile,
 		"-v", c.ToolCacheVolume() + ":/opt/hostedtoolcache",
 	}
@@ -472,7 +496,7 @@ func (c *Container) Run(ctx context.Context, name, jitConfig string, env []strin
 		return res, errors.New("container backend not prepared")
 	}
 	d := c.docker()
-	jobsDir := filepath.Join(c.Root, "jobs")
+	jobsDir := JobsDir(c.Root, c.Repo)
 	for _, dir := range []string{jobsDir, filepath.Dir(res.Log)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return res, err
@@ -515,7 +539,7 @@ func (c *Container) Run(ctx context.Context, name, jitConfig string, env []strin
 	if c.DockerMode == DockerSocket {
 		workVol = volumeName("spareci-job", name)
 		if _, err := d.Output(ctx, nil, "volume", "create",
-			"--label", "dev.spareci.job="+name, "--label", "dev.spareci.root="+c.Root, workVol); err != nil {
+			"--label", "dev.spareci.job="+name, "--label", "dev.spareci.root="+c.Root, "--label", "dev.spareci.repo="+c.Repo, workVol); err != nil {
 			return res, err
 		}
 	}

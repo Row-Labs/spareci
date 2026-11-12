@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,18 @@ type Spec struct {
 	Args []string          // arguments after the binary, starting with "up"
 	Env  map[string]string // e.g. PATH, so `gh` is found
 	Log  string            // stdout and stderr are appended here
+	// Drain is up's --drain-timeout, and StopAfter how long stopping may
+	// take after it (pool.StopAfterDrain). The service manager waits their
+	// sum after SIGTERM before it kills spareci; 0 Drain: no limit.
+	Drain, StopAfter time.Duration
+}
+
+// StopTimeout is how long the service manager lets spareci stop; 0: no limit.
+func (s Spec) StopTimeout() time.Duration {
+	if s.Drain <= 0 {
+		return 0
+	}
+	return s.Drain + s.StopAfter
 }
 
 // Name is the service's name for a repo, e.g. "spareci-row-labs-spareci".
@@ -46,7 +59,8 @@ func LaunchdLabel(repo string) string {
 
 // Plist renders the launchd agent. KeepAlive with SuccessfulExit=false
 // restarts spareci when it exits with an error or is killed by a signal (a
-// crash, kill -9), and leaves it stopped after a clean shutdown.
+// crash, kill -9), and leaves it stopped after a clean shutdown. ExitTimeOut
+// is how long launchd waits after SIGTERM before SIGKILL (0: forever).
 func Plist(s Spec) string {
 	var b bytes.Buffer
 	x := func(v string) string {
@@ -84,7 +98,7 @@ func Plist(s Spec) string {
 	<key>ThrottleInterval</key>
 	<integer>10</integer>
 	<key>ExitTimeOut</key>
-	<integer>60</integer>
+	<integer>%d</integer>
 	<key>ProcessType</key>
 	<string>Background</string>
 	<key>StandardOutPath</key>
@@ -93,13 +107,16 @@ func Plist(s Spec) string {
 	<string>%s</string>
 </dict>
 </plist>
-`, x(s.Log), x(s.Log))
+`, int(s.StopTimeout().Seconds()), x(s.Log), x(s.Log))
 	return b.String()
 }
 
 // Unit renders the systemd user unit. Restart=on-failure restarts spareci
 // after an error exit or an unclean signal such as SIGKILL; a clean stop
-// (SIGTERM, which spareci treats like ^C) leaves it stopped.
+// (SIGTERM, which spareci treats like ^C) leaves it stopped. KillMode=mixed
+// sends that SIGTERM to spareci alone: the default sends it to every process
+// in the unit, and a runner given SIGTERM cancels its job at once instead of
+// being drained.
 func Unit(s Spec) string {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, `[Unit]
@@ -113,15 +130,20 @@ ExecStart=%s
 	for _, k := range sortedKeys(s.Env) {
 		fmt.Fprintf(&b, "Environment=%s\n", systemdQuote(k+"="+s.Env[k]))
 	}
+	stop := "infinity"
+	if t := s.StopTimeout(); t > 0 {
+		stop = fmt.Sprintf("%ds", int(t.Seconds()))
+	}
 	fmt.Fprintf(&b, `Restart=on-failure
 RestartSec=10
-TimeoutStopSec=60
+KillMode=mixed
+TimeoutStopSec=%s
 StandardOutput=append:%s
 StandardError=append:%s
 
 [Install]
 WantedBy=default.target
-`, systemdEscape(s.Log), systemdEscape(s.Log))
+`, stop, systemdEscape(s.Log), systemdEscape(s.Log))
 	return b.String()
 }
 
@@ -176,10 +198,14 @@ func Path(repo string) (string, error) {
 }
 
 // Install writes the service file and starts the service, replacing any
-// earlier install for the same repo.
-func Install(s Spec) (string, error) {
+// earlier install for the same repo. A running one is stopped first as
+// Stop does, so its jobs drain for up to s.Drain; out gets its progress.
+func Install(s Spec, out io.Writer) (string, error) {
 	path, err := Path(s.Repo)
 	if err != nil {
+		return "", err
+	}
+	if err := Stop(s.Repo, s.Drain, s.StopAfter, s.Log, out); err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(s.Log), 0o755); err != nil {
@@ -208,8 +234,9 @@ func Install(s Spec) (string, error) {
 	return path, systemctl("restart", Name(s.Repo)+".service")
 }
 
-// Uninstall stops the service (spareci gets SIGTERM and shuts down as on ^C)
-// and removes its file. It reports whether anything was installed.
+// Uninstall stops the service and removes its file. It reports whether
+// anything was installed. Call Stop first: here the service manager stops
+// spareci, and kills it after the stop timeout.
 func Uninstall(repo string) (bool, error) {
 	path, err := Path(repo)
 	if err != nil {
