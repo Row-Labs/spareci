@@ -117,7 +117,8 @@ func (c *Client) GetJob(ctx context.Context, repo string, jobID int64) (RunJob, 
 	return j, err
 }
 
-// FileAt is a file's contents at ref (a commit SHA, branch or tag).
+// FileAt is a file's contents at ref (a commit SHA, branch or tag; "" for
+// the default branch).
 func (c *Client) FileAt(ctx context.Context, repo, path, ref string) ([]byte, error) {
 	var resp struct {
 		Type     string `json:"type"`
@@ -128,7 +129,10 @@ func (c *Client) FileAt(ctx context.Context, repo, path, ref string) ([]byte, er
 	for i, s := range segs {
 		segs[i] = url.PathEscape(s)
 	}
-	p := fmt.Sprintf("/repos/%s/contents/%s?ref=%s", repo, strings.Join(segs, "/"), url.QueryEscape(ref))
+	p := fmt.Sprintf("/repos/%s/contents/%s", repo, strings.Join(segs, "/"))
+	if ref != "" {
+		p += "?ref=" + url.QueryEscape(ref)
+	}
 	if err := c.do(ctx, "GET", p, nil, &resp); err != nil {
 		return nil, err
 	}

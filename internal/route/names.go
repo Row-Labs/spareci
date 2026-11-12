@@ -2,6 +2,7 @@ package route
 
 import (
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -84,23 +85,6 @@ func Vars(base string) []string {
 	return append(out, base)
 }
 
-// Routes is the variable and label for each target, plus the old variable
-// with the plain prefix as its label when legacy is set. With an empty base
-// there is no routing.
-func Routes(base, prefix string, targets []Target, legacy bool) []Route {
-	if base == "" {
-		return nil
-	}
-	var out []Route
-	for _, t := range targets {
-		out = append(out, Route{Var: t.Var(base), Label: t.Label(prefix)})
-	}
-	if legacy {
-		out = append(out, Route{Var: base, Label: prefix})
-	}
-	return out
-}
-
 var macosVersion = regexp.MustCompile(`^macos-(\d+)`)
 
 // HostedPlatform maps a GitHub-hosted label to its OS and architecture.
@@ -169,4 +153,73 @@ func TargetFor(labels []string) (Target, bool) {
 		return TargetLinux, true
 	}
 	return Target{}, false
+}
+
+// Group is routing variables that one heartbeat covers and one machine owns
+// at a time: one OS's, or the old shared variable (see
+// docs/how-it-works.md, Several machines per repo).
+type Group struct {
+	OS        string  // MacOS or Linux; "" for the old shared variable
+	Heartbeat string  // repo variable; "" without a heartbeat
+	Routes    []Route // the variables, and the labels this machine sets them to
+}
+
+// Legacy reports whether g is the old shared variable SPARECI_RUNS_ON.
+func (g Group) Legacy() bool { return g.OS == "" }
+
+// Name is the group for messages: "macOS", "Linux", or the old variable.
+func (g Group) Name() string {
+	switch g.OS {
+	case MacOS:
+		return "macOS"
+	case Linux:
+		return "Linux"
+	}
+	if len(g.Routes) > 0 {
+		return g.Routes[0].Var
+	}
+	return "routing"
+}
+
+// HeartbeatVar is the heartbeat of an OS's group: base_MACOS or base_LINUX.
+// The old shared variable's heartbeat is base itself.
+func HeartbeatVar(base, osName string) string {
+	if base == "" || osName == "" {
+		return base
+	}
+	return base + "_" + strings.ToUpper(osName)
+}
+
+// OSes are the OSes spareci routes, in a stable order.
+var OSes = []string{MacOS, Linux}
+
+// Groups splits the routes for targets into one group per OS, plus the old
+// shared variable with the plain prefix as its label when legacy is set.
+// With an empty base there is no routing.
+func Groups(base, prefix, heartbeat string, targets []Target, legacy bool) []Group {
+	if base == "" {
+		return nil
+	}
+	var out []Group
+	for _, osName := range OSes {
+		g := Group{OS: osName, Heartbeat: HeartbeatVar(heartbeat, osName)}
+		for _, t := range Targets {
+			if t.OS == osName && slices.Contains(targets, t) {
+				g.Routes = append(g.Routes, Route{Var: t.Var(base), Label: t.Label(prefix)})
+			}
+		}
+		if len(g.Routes) > 0 {
+			out = append(out, g)
+		}
+	}
+	if legacy {
+		out = append(out, Group{Heartbeat: heartbeat, Routes: []Route{{Var: base, Label: prefix}}})
+	}
+	return out
+}
+
+// AllGroups is every group with every variable: what the watchdog, status
+// and down look at.
+func AllGroups(base, prefix, heartbeat string) []Group {
+	return Groups(base, prefix, heartbeat, Targets, true)
 }

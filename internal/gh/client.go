@@ -295,6 +295,19 @@ func (c *Client) SetVariable(ctx context.Context, repo, name, value string) erro
 	return err
 }
 
+// GetVariable reads a repository Actions variable; one that doesn't exist
+// reads as "".
+func (c *Client) GetVariable(ctx context.Context, repo, name string) (string, error) {
+	var v struct {
+		Value string `json:"value"`
+	}
+	err := c.do(ctx, "GET", fmt.Sprintf("/repos/%s/actions/variables/%s", repo, name), nil, &v)
+	if IsStatus(err, 404) {
+		return "", nil
+	}
+	return v.Value, err
+}
+
 func (c *Client) DeleteVariable(ctx context.Context, repo, name string) error {
 	err := c.do(ctx, "DELETE", fmt.Sprintf("/repos/%s/actions/variables/%s", repo, name), nil, nil)
 	if IsStatus(err, 404) {

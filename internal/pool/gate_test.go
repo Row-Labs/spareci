@@ -138,8 +138,9 @@ func newTestPool(t *testing.T, g Gate) (*Pool, *fakeGitHub) {
 		Backends: []*Backend{{Backend: &fakeBackend{os: "macos", arch: "arm64"}, Routing: []string{"spareci"}}},
 		Max:      0, // never spawn a real runner
 		Interval: time.Hour,
-		Router: &route.Router{API: client, Repo: "o/r", Routes: []route.Route{{Var: "SPARECI_RUNS_ON", Label: "spareci"}},
-			HeartbeatVar: "SPARECI_HEARTBEAT", Poll: time.Millisecond},
+		Router: &route.Router{API: client, Repo: "o/r", Machine: "mac",
+			Groups: []route.Group{{Heartbeat: "SPARECI_HEARTBEAT", Routes: []route.Route{{Var: "SPARECI_RUNS_ON", Label: "spareci"}}}},
+			Poll:   time.Millisecond},
 		Gate: g,
 	}, client)
 	return p, fg
@@ -241,10 +242,13 @@ func TestGateClosedAtStartClearsLeftoverRouting(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
+	// The busy run would hold the drain until the drain timeout.
+	hard, hardCancel := context.WithCancel(context.Background())
 	done := make(chan error)
-	go func() { done <- p.Run(ctx, context.Background()) }()
+	go func() { done <- p.Run(ctx, hard) }()
 	waitFor(t, "variable cleared", func() bool { return fg.get("SPARECI_RUNS_ON") == "" && fg.get("SPARECI_HEARTBEAT") == "" })
 	cancel()
+	hardCancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}

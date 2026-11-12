@@ -47,7 +47,7 @@ func watchdog(args []string) error {
 	if c.vname == "" || c.hname == "" {
 		return fmt.Errorf("the watchdog needs both --fallback-var and --heartbeat-var")
 	}
-	workflow := route.Watchdog(route.Vars(c.vname), c.hname)
+	workflow := route.Watchdog(route.AllGroups(c.vname, c.label, c.hname))
 	if !*setup {
 		fmt.Print(workflow)
 		return nil

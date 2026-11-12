@@ -192,7 +192,7 @@ Each kind of job has its own repo variable, picked by the GitHub-hosted runner t
 | `SPARECI_RUNS_ON_LINUX` | `spareci-linux` | `ubuntu-*` (x64) | an x64 Linux machine; an arm64 machine runs them as arm64 by default (`--linux-x64-on-arm`), or a Mac in x64 containers with `--linux-x64-on-arm=false` |
 | `SPARECI_RUNS_ON_LINUX_ARM` | `spareci-linux-arm` | `ubuntu-*-arm` | an arm64 Linux machine; an Apple Silicon Mac with a container runtime |
 
-On a Mac, Linux jobs run in a fresh container each (OrbStack, Docker Desktop or Colima), from an image spareci builds locally the first time (a few minutes). `--linux-cpus` and `--linux-memory` limit each job's container. Jobs get the container runtime's Docker socket (`--linux-docker=none` to refuse), so a job can control the runtime: see [Linux jobs in containers](docs/linux-containers.md) for that trade-off and what the image has compared with GitHub's. Without a running container runtime, the Mac sets only `SPARECI_RUNS_ON_MACOS`, and Linux jobs stay on GitHub. `--max` limits all jobs at once; `--max-macos` and `--max-linux` limit each kind. Run spareci on one machine per repo for now: a second machine for the same repo shares the variables, and when one stops it briefly turns routing off for the other (see [how it works](docs/how-it-works.md#routing)).
+On a Mac, Linux jobs run in a fresh container each (OrbStack, Docker Desktop or Colima), from an image spareci builds locally the first time (a few minutes). `--linux-cpus` and `--linux-memory` limit each job's container. Jobs get the container runtime's Docker socket (`--linux-docker=none` to refuse), so a job can control the runtime: see [Linux jobs in containers](docs/linux-containers.md) for that trade-off and what the image has compared with GitHub's. Without a running container runtime, the Mac sets only `SPARECI_RUNS_ON_MACOS`, and Linux jobs stay on GitHub. `--max` limits all jobs at once; `--max-macos` and `--max-linux` limit each kind. `--os macos` or `--os linux` limits the machine to one OS, so another machine can take the rest ([Several machines](#several-machines)).
 
 `ubuntu-24.04` means x64, but most jobs don't care about the CPU. So on an arm64 machine (Apple Silicon, or an arm64 Linux box), spareci runs Linux x64 jobs as arm64 by default (`--linux-x64-on-arm`). On a Mac they then run in arm64 containers natively, not x64 ones under Rosetta. On this repo's CI that made the build about 2.5x faster than x64 under Rosetta, and faster than GitHub-hosted ([measured](docs/linux-containers.md#architecture)). `spareci init` recommends those jobs with a note that they'll run as arm64.
 
@@ -201,6 +201,26 @@ The trade-off: a job that downloads x64-only binaries, or builds and ships x64 a
 A job is sent to a backend when its `runs-on` labels are all ones that backend's runners have: `self-hosted`, the OS (`macOS` or `Linux`), the arch (`ARM64` or `X64`) and its routing label (change the `spareci` prefix with `--label`). The `vars.SPARECI_RUNS_ON_* || ...` form is what gives you the fallback, and spareci sets and clears those variables for you.
 
 **Upgrading from 0.1.** spareci 0.1 used one variable, `SPARECI_RUNS_ON` (set to `spareci`), for every job, so a Linux job opted in on a Mac ran on macOS. spareci still sets `SPARECI_RUNS_ON` for the machine's own OS and architecture, so existing workflows keep working, but it's deprecated and will stop being set in a later release. Run `spareci init` (or `spareci init --upgrade`) to move those lines to their per-OS variable, and `spareci watchdog` to regenerate the watchdog, which clears every routing variable.
+
+### Several machines
+
+One repo can use several machines, one per OS: for example macOS jobs on a Mac mini and Linux jobs on a Linux server. Tell each machine which OS it takes:
+
+```sh
+# on the Mac mini
+spareci install --repo you/app --os macos
+# on the Linux server
+spareci install --repo you/app --os linux
+```
+
+The Mac then sets only `SPARECI_RUNS_ON_MACOS` and builds no Linux containers; the server sets only `SPARECI_RUNS_ON_LINUX` and `SPARECI_RUNS_ON_LINUX_ARM`. Each OS has its own heartbeat (`SPARECI_HEARTBEAT_MACOS`, `SPARECI_HEARTBEAT_LINUX`) with the machine's name in it, so:
+
+- Stopping, pausing (laptop mode) or losing one machine turns off only its own OS's routing. The other machine's jobs keep coming to it.
+- The watchdog clears only the dead machine's variables. Regenerate it once for this (`spareci watchdog > .github/workflows/spareci-watchdog.yml`); a machine with `--os` refuses to start while the repo has the 0.2 watchdog, which would clear its routing.
+- Two machines can't take the same OS for one repo. The second one refuses to start and says which machine has it: `server is serving Linux jobs for you/app (heartbeat 20s ago in SPARECI_HEARTBEAT_LINUX)`.
+- `spareci status` shows which machine serves each OS.
+
+`--name` sets the machine's name (default: its host name). Machines with `--os` don't set the old `SPARECI_RUNS_ON` from 0.1: run `spareci init --upgrade` first if your workflows still use it. A single machine without `--os` works as before, and still keeps the old `SPARECI_HEARTBEAT` up to date, so an existing watchdog keeps working until you regenerate it. See [how it works](docs/how-it-works.md#several-machines-per-repo).
 
 ### Run it in the background
 
@@ -279,6 +299,7 @@ By default (`--job-home=spareci`) each repo's jobs get a persistent home of thei
 
 - Jobs in the same repo share their job home, and so do concurrent jobs (`--max 2`). Whatever one job leaves there, the next one sees.
 - One repo per `spareci up` process.
+- One machine per OS per repo: two machines can split a repo by OS, but can't share one OS's jobs.
 - Jobs using `container:` or Docker container actions can't reach the local cache yet; they fall back to GitHub's cache.
 - BuildKit's `type=gha` cache uses the local cache on macOS only (through `host.docker.internal`). On Linux it uses GitHub's cache service, as without spareci.
 - Without the watchdog workflow, if spareci dies without `^C` (crash, power loss), jobs queue for this machine until it starts again or you run `spareci down`. `spareci install` restarts it after a crash, but can't help when the machine itself is off.

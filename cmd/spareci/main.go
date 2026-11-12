@@ -5,6 +5,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -35,6 +37,7 @@ Usage:
   spareci init      [--jobs workflow:job,...] [--all-compatible] [--dry-run]
                     opt this repo's workflow jobs in to spareci and open a PR
   spareci up        [--repo owner/name] [--label spareci] [--max 1] [--max-wait 10m]
+                    [--os macos|linux]... [--name machine]
                     [--max-macos N] [--max-linux N] [--linux-x64-on-arm=false]
                     [--dry-run] [--cache=true] [--cache-size 10GB]
                     [--job-home spareci|user|PATH] [--git-mirror=true]
@@ -60,6 +63,8 @@ and to GitHub otherwise, with the variable for the job's OS:
   runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX_ARM || 'ubuntu-24.04-arm' }}
 
 spareci up sets each one while this machine can run that kind of job.
+Several machines can split a repo by OS: spareci up --os macos on a Mac,
+spareci up --os linux on a Linux machine.
 SPARECI_RUNS_ON, from spareci 0.1, still routes to this machine's own OS;
 spareci init upgrades it.
 `
@@ -112,6 +117,41 @@ type common struct {
 	label string
 	vname string
 	hname string
+	name  string  // this machine, in heartbeats and runner names
+	oses  osFlags // --os; empty: every OS the machine can run
+}
+
+// osFlags collects --os, repeated or comma-separated.
+type osFlags []string
+
+func (o *osFlags) String() string { return strings.Join(*o, ",") }
+
+func (o *osFlags) Set(v string) error {
+	for _, s := range strings.Split(v, ",") {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if !slices.Contains(route.OSes, s) {
+			return fmt.Errorf("unknown OS %q: want %s", s, strings.Join(route.OSes, " or "))
+		}
+		if !slices.Contains(*o, s) {
+			*o = append(*o, s)
+		}
+	}
+	return nil
+}
+
+// serves reports whether this machine was asked to serve an OS: every OS
+// without --os.
+func (c *common) serves(osName string) bool {
+	return len(c.oses) == 0 || slices.Contains(c.oses, osName)
+}
+
+// split reports whether --os was given. Such a machine shares the repo with
+// others, and doesn't own the old shared variable SPARECI_RUNS_ON.
+func (c *common) split() bool { return len(c.oses) > 0 }
+
+func defaultMachine() string {
+	host, _ := os.Hostname()
+	return route.CleanMachine(cmp.Or(strings.Split(host, ".")[0], "spareci"))
 }
 
 func commonFlags(fs *flag.FlagSet) *common {
@@ -119,13 +159,32 @@ func commonFlags(fs *flag.FlagSet) *common {
 	fs.StringVar(&c.repo, "repo", "", "owner/name (default: the repo in the current directory)")
 	fs.StringVar(&c.label, "label", route.DefaultPrefix, "routing label prefix: jobs routed here carry <label>-macos, <label>-linux, ... (or <label> from SPARECI_RUNS_ON)")
 	fs.StringVar(&c.vname, "fallback-var", route.DefaultBase, "base name of the routing variables: <name>_MACOS, <name>_LINUX, <name>_LINUX_ARM and <name> itself (empty to disable routing)")
-	fs.StringVar(&c.hname, "heartbeat-var", "SPARECI_HEARTBEAT", "repo variable refreshed while up, read by the watchdog workflow (empty to disable)")
+	fs.StringVar(&c.hname, "heartbeat-var", "SPARECI_HEARTBEAT", "base name of the heartbeats refreshed while up, read by the watchdog workflow: <name>_MACOS, <name>_LINUX and <name> itself (empty to disable)")
+	fs.StringVar(&c.name, "name", defaultMachine(), "this machine's name, written in its heartbeats and runner names")
+	fs.Var(&c.oses, "os", "serve only this OS's jobs: macos or linux; repeat for both (default: every OS this machine can run). Lets several machines split a repo")
 	return c
 }
 
-// router routes the given kinds of jobs here, plus the old shared variable.
+// router routes the given kinds of jobs here. A machine started without
+// --os also owns the old shared variable.
 func (c *common) router(client *gh.Client, targets []route.Target) *route.Router {
-	return &route.Router{API: client, Repo: c.repo, Routes: route.Routes(c.vname, c.label, targets, true), HeartbeatVar: c.hname}
+	r := &route.Router{API: client, Repo: c.repo, Machine: route.CleanMachine(c.name),
+		Groups: route.Groups(c.vname, c.label, c.hname, targets, !c.split())}
+	if c.split() {
+		r.OldHeartbeat = c.hname
+	}
+	return r
+}
+
+// targets are the kinds of jobs of the OSes this machine serves.
+func (c *common) targets() []route.Target {
+	var out []route.Target
+	for _, t := range route.Targets {
+		if c.serves(t.OS) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func (c *common) resolve() error {
@@ -238,6 +297,9 @@ func up(args []string) error {
 	if err := c.resolve(); err != nil {
 		return err
 	}
+	if c.serves(route.MacOS) && c.split() && runner.HostOS() != runner.OSMacOS {
+		return fmt.Errorf("--os macos: this machine can't run macOS jobs; only a Mac can")
+	}
 	g, err := o.laptop.gate(c.repo)
 	if err != nil {
 		return err
@@ -245,6 +307,13 @@ func up(args []string) error {
 	client, err := gh.New()
 	if err != nil {
 		return err
+	}
+	if c.split() && !*dry && c.vname != "" {
+		// Before the slow setup (the container image): refuse now if another
+		// machine serves one of these OSes.
+		if err := checkSplit(context.Background(), client, c); err != nil {
+			return err
+		}
 	}
 
 	sigs := make(chan os.Signal, 3)
@@ -296,24 +365,39 @@ func up(args []string) error {
 		}
 	}
 
-	all := append([]runner.Backend{host}, linuxBackends(soft, host, c.repo, *dry, *o.x64OnARM, o.linux)...)
+	var all []runner.Backend
+	if c.serves(runner.HostOS()) {
+		all = append(all, host)
+	}
+	if c.serves(route.Linux) {
+		all = append(all, linuxBackends(soft, host, c.repo, *dry, *o.x64OnARM, o.linux)...)
+	}
 	backends, targets := pool.Assign(all, pool.Policy{
-		Prefix: c.label, X64OnARM: *o.x64OnARM, Legacy: true,
+		Prefix: c.label, X64OnARM: *o.x64OnARM, Legacy: !c.split(),
 		Max: map[string]int{runner.OSMacOS: *o.maxMacOS, runner.OSLinux: *o.maxLinux},
 	})
 	if len(backends) == 0 {
+		if c.split() {
+			return fmt.Errorf("this machine can't run %s jobs now (on a Mac, Linux jobs need a running container runtime: OrbStack, Docker Desktop or Colima)", strings.Join(c.oses, " or "))
+		}
 		return fmt.Errorf("no backend can run jobs on %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	for _, osName := range c.oses {
+		if !slices.ContainsFunc(backends, func(b *pool.Backend) bool { return b.OS() == osName }) {
+			return fmt.Errorf("--os %s: this machine can't run %s jobs now (on a Mac, Linux jobs need a running container runtime: OrbStack, Docker Desktop or Colima)", osName, osName)
+		}
 	}
 	for _, b := range backends {
 		slog.Info("backend", "name", b.Name(), "labels", b.AllLabels(), "max", cmp.Or(b.Max, *maxN))
 	}
-	slog.Info("spareci up", "repo", c.repo, "max", *maxN, "runner", host.Version, "dir", host.Root, "job_home", cmp.Or(host.JobHome, "user"), "local_cache", cacheSrv != nil, "git_mirror", host.Git != nil, "dry_run", *dry)
+	slog.Info("spareci up", "repo", c.repo, "machine", route.CleanMachine(c.name), "os", cmp.Or(c.oses.String(), "all"), "max", *maxN, "runner", host.Version, "dir", host.Root, "job_home", cmp.Or(host.JobHome, "user"), "local_cache", cacheSrv != nil, "git_mirror", host.Git != nil, "dry_run", *dry)
 	p := pool.New(pool.Config{
 		Repo:     c.repo,
 		Backends: backends,
 		Max:      *maxN,
 		Interval: *interval,
 		Router:   c.router(client, targets),
+		Machine:  route.CleanMachine(c.name),
 		MaxWait:  *maxWait,
 		DryRun:   *dry,
 		Cache:    cacheSrv,
@@ -324,7 +408,54 @@ func up(args []string) error {
 		slog.Info("laptop mode: taking jobs only when conditions are met", "when", g.Config().String())
 		defer removeGateState(c.repo)
 	}
-	return p.Run(soft, hard)
+	return conflictHint(p.Run(soft, hard), c)
+}
+
+// conflictHint adds what to do to another machine serving the same OS.
+func conflictHint(err error, c *common) error {
+	var ce *route.ConflictError
+	if !errors.As(err, &ce) {
+		return err
+	}
+	if ce.Owner.Group.Legacy() || ce.Owner.Machine == "" {
+		return fmt.Errorf("%w. Stop spareci there (or upgrade it to 0.3 and split the OSes with --os), then start this one again", err)
+	}
+	var rest []string
+	for _, osName := range route.OSes {
+		if osName != ce.Owner.Group.OS && (c.serves(osName) || !c.split()) {
+			rest = append(rest, osName)
+		}
+	}
+	hint := "stop spareci there"
+	if len(rest) > 0 {
+		hint += ", or start this machine with --os " + strings.Join(rest, " --os ")
+	}
+	return fmt.Errorf("%w. Two machines can't serve the same OS for one repo: %s. If %s is gone, its heartbeat goes stale in %s, or clear it with spareci down --name %s on any machine",
+		err, hint, ce.Owner.Who(), route.StaleAfter-ce.Owner.Age.Round(time.Second), ce.Owner.Machine)
+}
+
+// checkSplit runs before a machine with --os starts: no other machine may
+// serve its OSes, no spareci 0.2 (which takes every OS) may be up, and the
+// repo's watchdog must know per-OS heartbeats, or it would clear this
+// machine's routing every few minutes.
+func checkSplit(ctx context.Context, client *gh.Client, c *common) error {
+	r := c.router(client, c.targets())
+	if err := r.Check(ctx); err != nil {
+		return conflictHint(err, c)
+	}
+	if c.hname == "" {
+		return nil
+	}
+	wf, err := client.FileAt(ctx, c.repo, watchdogPath, "")
+	switch {
+	case gh.IsStatus(err, 404):
+	case err != nil:
+		slog.Warn("could not read the watchdog workflow; if it's from spareci 0.2, regenerate it with spareci watchdog", "path", watchdogPath, "err", err)
+	case !strings.Contains(string(wf), route.HeartbeatVar(c.hname, route.MacOS)):
+		return fmt.Errorf("%s on %s's default branch is from spareci 0.2: it reads only %s, which machines started with --os don't write, so it would clear their routing every few minutes. Regenerate it (spareci watchdog > %s) and merge it, or start without --os",
+			watchdogPath, c.repo, c.hname, watchdogPath)
+	}
+	return nil
 }
 
 func status(args []string) error {
@@ -345,6 +476,9 @@ func status(args []string) error {
 	}
 	fmt.Printf("repo: %s\n", c.repo)
 	printGateState(c.repo)
+	if err := printOwners(ctx, client, c); err != nil {
+		return err
+	}
 	fmt.Printf("self-hosted runners: %d\n", len(runners))
 	for _, r := range runners {
 		fmt.Printf("  %-40s %-8s busy=%v\n", r.Name, r.Status, r.Busy)
@@ -356,6 +490,51 @@ func status(args []string) error {
 	fmt.Printf("queued jobs: %d\n", len(jobs))
 	for _, j := range jobs {
 		fmt.Printf("  %-40s runs-on=%v\n", j.Name, j.Labels)
+	}
+	return nil
+}
+
+// printOwners shows which machine serves each OS, by its heartbeat.
+func printOwners(ctx context.Context, client *gh.Client, c *common) error {
+	if c.vname == "" {
+		return nil
+	}
+	now := time.Now()
+	fmt.Println("routing:")
+	old := route.Owner{}
+	if c.hname != "" {
+		var err error
+		if old, err = route.ReadOwner(ctx, client, c.repo, route.Group{Heartbeat: c.hname}, now); err != nil {
+			return err
+		}
+	}
+	for _, g := range route.AllGroups(c.vname, c.label, c.hname) {
+		o, err := route.ReadOwner(ctx, client, c.repo, g, now)
+		if err != nil {
+			return err
+		}
+		if !o.Beating && !g.Legacy() && old.Beating {
+			// spareci 0.2 writes only the old heartbeat, as the watchdog reads it.
+			o.Beating, o.Machine, o.Age = true, old.Machine, old.Age
+		}
+		var state string
+		switch {
+		case len(o.Set) == 0 && !o.Fresh():
+			state = "off: jobs go to GitHub-hosted runners"
+		case len(o.Set) == 0:
+			state = fmt.Sprintf("off, but %s's heartbeat is %s old (laptop mode resuming?)", o.Who(), o.Age.Round(time.Second))
+		case o.Fresh():
+			state = fmt.Sprintf("%s, heartbeat %s ago", o.Who(), o.Age.Round(time.Second))
+		case o.Beating:
+			state = fmt.Sprintf("%s stopped beating %s ago: jobs queue for it until the watchdog or spareci down --name %s clears %s",
+				o.Who(), o.Age.Round(time.Second), o.Machine, strings.Join(o.Set, ", "))
+		default:
+			state = "set with no heartbeat: jobs queue for a machine that may be gone (spareci down)"
+		}
+		if o.Fresh() && o.Machine == route.CleanMachine(c.name) {
+			state += " (this machine)"
+		}
+		fmt.Printf("  %-16s %s\n", g.Name(), state)
 	}
 	return nil
 }
@@ -374,29 +553,37 @@ func down(args []string) error {
 	return routeBack(context.Background(), client, c)
 }
 
-// routeBack clears every routing variable, sends jobs routed to spareci and
-// still queued to GitHub-hosted runners, re-runs jobs left in progress on
-// this machine's runners that are gone, and removes runner registrations
-// left behind by a crash.
+// routeBack clears the routing variables of this machine's OSes (every OS
+// without --os), sends jobs routed to them and still queued to
+// GitHub-hosted runners, re-runs jobs left in progress on this machine's
+// runners that are gone, and removes runner registrations left behind by a
+// crash. An OS whose fresh heartbeat names another machine is left alone:
+// that machine serves it.
 func routeBack(ctx context.Context, client *gh.Client, c *common) error {
 	runners, err := client.ListRunners(ctx, c.repo)
 	if err != nil {
 		return err
 	}
-	r := c.router(client, route.Targets)
+	prefix := pool.RunnerPrefix(route.CleanMachine(c.name))
+	r := c.router(client, c.targets())
 	if r.Enabled() {
 		if err := r.Stop(ctx); err != nil {
 			return err
 		}
-		fmt.Printf("cleared %s: new jobs go to GitHub-hosted runners\n", strings.Join(r.Vars(), ", "))
-		n, err := pool.RescueQueued(ctx, client, r, r.Routed)
-		if n > 0 {
-			fmt.Printf("re-ran %d run(s) whose jobs were queued for this machine\n", n)
+		for _, h := range r.Held() {
+			fmt.Printf("left %s routing alone: another machine is serving it (spareci status)\n", h)
 		}
-		if err != nil {
-			return err
+		if vars := r.Vars(); len(vars) > 0 {
+			fmt.Printf("cleared %s: new jobs go to GitHub-hosted runners\n", strings.Join(vars, ", "))
+			n, err := pool.RescueQueued(ctx, client, r, r.Routed)
+			if n > 0 {
+				fmt.Printf("re-ran %d run(s) whose jobs were queued for this machine\n", n)
+			}
+			if err != nil {
+				return err
+			}
 		}
-		runs, err := strandedRuns(ctx, client, c.repo, runners)
+		runs, err := strandedRuns(ctx, client, c.repo, prefix, runners)
 		if err != nil {
 			return err
 		}
@@ -410,7 +597,7 @@ func routeBack(ctx context.Context, client *gh.Client, c *common) error {
 	for _, r := range runners {
 		// Only this machine's: another machine's runner is offline for its
 		// first seconds too, before it connects.
-		if strings.HasPrefix(r.Name, pool.RunnerPrefix()) && r.Status == "offline" {
+		if strings.HasPrefix(r.Name, prefix) && r.Status == "offline" {
 			if err := client.DeleteRunner(ctx, c.repo, r.ID); err != nil {
 				return err
 			}
@@ -424,7 +611,7 @@ func routeBack(ctx context.Context, client *gh.Client, c *common) error {
 // runners that is offline or no longer registered: spareci was killed
 // before it could stop the runner, and GitHub would keep the job in
 // progress for minutes.
-func strandedRuns(ctx context.Context, client *gh.Client, repo string, runners []gh.Runner) ([]int64, error) {
+func strandedRuns(ctx context.Context, client *gh.Client, repo, prefix string, runners []gh.Runner) ([]int64, error) {
 	online := map[string]bool{}
 	for _, r := range runners {
 		online[r.Name] = r.Status != "offline"
@@ -440,7 +627,7 @@ func strandedRuns(ctx context.Context, client *gh.Client, repo string, runners [
 			return nil, err
 		}
 		for _, j := range jobs {
-			if j.Status == "in_progress" && strings.HasPrefix(j.RunnerName, pool.RunnerPrefix()) && !online[j.RunnerName] {
+			if j.Status == "in_progress" && strings.HasPrefix(j.RunnerName, prefix) && !online[j.RunnerName] {
 				out = append(out, run.ID)
 				break
 			}

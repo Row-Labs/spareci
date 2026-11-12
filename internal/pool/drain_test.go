@@ -265,8 +265,9 @@ func drainPool(t *testing.T, max int) (*Pool, *repoFake, *jobBackend) {
 		Backends: []*Backend{{Backend: b, Routing: []string{"spareci"}}},
 		Max:      max,
 		Interval: 5 * time.Millisecond,
-		Router: &route.Router{API: client, Repo: "o/r", Routes: []route.Route{{Var: "SPARECI_RUNS_ON", Label: "spareci"}},
-			Poll: time.Millisecond, CancelWait: 50 * time.Millisecond, RerunWait: time.Second},
+		Router: &route.Router{API: client, Repo: "o/r", Machine: "mac",
+			Groups: []route.Group{{Routes: []route.Route{{Var: "SPARECI_RUNS_ON", Label: "spareci"}}}},
+			Poll:   time.Millisecond, CancelWait: 50 * time.Millisecond, RerunWait: time.Second},
 	}, client)
 	return p, f, b
 }
@@ -393,5 +394,44 @@ func TestStopBudgetFits(t *testing.T) {
 	findRuns := 15 * time.Second
 	if StopRunners+findRuns+rescueTimeout >= StopAfterDrain {
 		t.Errorf("stopping can take %v, more than StopAfterDrain (%v)", StopRunners+findRuns+rescueTimeout, StopAfterDrain)
+	}
+}
+
+// A run with a job queued here and another job running on another machine
+// (or on GitHub) isn't cancelled when this machine stops: that would throw
+// the other job's work away. It goes back when that job ends, or when the
+// drain timeout passes.
+func TestDrainWaitsForJobsRunningElsewhere(t *testing.T) {
+	for _, timeout := range []bool{false, true} {
+		p, f, _ := drainPool(t, 0) // takes no jobs itself
+		f.add(1, gh.Job{Name: "linux", Labels: []string{"spareci"}}, gh.Job{Name: "mac", Labels: []string{"spareci-macos"}})
+		f.mu.Lock()
+		f.jobs[1][1].Status, f.jobs[1][1].RunnerName = "in_progress", "spareci-mini-1"
+		f.settle(1)
+		f.mu.Unlock()
+
+		soft, softCancel := context.WithCancel(context.Background())
+		hard, hardCancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		softCancel()
+		go func() { done <- p.Run(soft, hard) }()
+		time.Sleep(100 * time.Millisecond)
+		if f.called("cancel 1") || f.called("force-cancel 1") {
+			t.Fatalf("run cancelled while another machine's job in it was running: %v", f.calls)
+		}
+		if timeout {
+			hardCancel()
+		} else {
+			f.finish("spareci-mini-1", "success")
+		}
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("drain didn't return")
+		}
+		if !f.called("rerun 1") {
+			t.Errorf("timeout %v: run 1's queued job wasn't sent back: %v", timeout, f.calls)
+		}
+		hardCancel()
 	}
 }

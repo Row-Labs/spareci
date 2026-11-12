@@ -81,7 +81,7 @@ func (p *Pool) syncRouting(ctx context.Context, want bool) {
 	}
 	p.routed = want
 	if want {
-		slog.Info("routing on", "variables", r.Vars(), "heartbeat", r.HeartbeatVar)
+		slog.Info("routing on", "variables", r.Vars(), "heartbeats", r.Heartbeats())
 	} else {
 		slog.Info("routing off: new jobs go to GitHub-hosted runners", "variables", r.Vars())
 	}

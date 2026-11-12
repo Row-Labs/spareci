@@ -4,9 +4,9 @@ on:
   push:
   workflow_dispatch:
 
-# Every job runs on a machine running `spareci up` that takes Linux x64 jobs
-# while one is up (on a Mac, in a container), and on GitHub-hosted runners
-# otherwise, so CI checks spareci both ways.
+# Every Linux job runs on a machine running `spareci up` that takes Linux x64
+# jobs while one is up (on a Mac, in a container), and on GitHub-hosted
+# runners otherwise, so CI checks spareci both ways.
 jobs:
   build:
     runs-on: ${{ vars.SPARECI_RUNS_ON_LINUX || 'ubuntu-24.04' }}
@@ -23,6 +23,21 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - run: go build -o bin/spareci ./cmd/spareci
+
+  # macOS, for the darwin-only code and for a repo split by OS (a Mac with
+  # `spareci up --os macos`, Linux jobs elsewhere). It runs on a push only
+  # while a Mac serves macOS jobs, so it's free; without one it runs only
+  # when dispatched, on macos-15 at GitHub's macOS price.
+  test-macos:
+    if: vars.SPARECI_RUNS_ON_MACOS != '' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ vars.SPARECI_RUNS_ON_MACOS || 'macos-15' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./internal/... ./cmd/...
 
   # End to end through real actions: save in one job, restore in the next.
   cache-save:

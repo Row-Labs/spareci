@@ -59,7 +59,14 @@ func (h *Host) PrepareDocker() error {
 	return nil
 }
 
+// DefaultRoot is where spareci keeps the runner, jobs, caches and state:
+// $SPARECI_ROOT, or spareci in the user's cache directory. Two spareci
+// processes for one repo on one machine (say --os macos and --os linux)
+// need different roots, or each cleans up the other's jobs.
 func DefaultRoot() string {
+	if dir := os.Getenv("SPARECI_ROOT"); dir != "" {
+		return dir
+	}
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		dir = os.TempDir()

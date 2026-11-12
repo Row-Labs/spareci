@@ -8,7 +8,7 @@
 | `internal/gh` | The few GitHub REST calls needed: queued jobs, JIT runners, repo variables, run history |
 | `internal/gate` | Laptop mode: whether the machine takes jobs now (power, user idle time, hours) |
 | `internal/pool` | Poll loop: matches queued jobs to backends, decides which runners to start, applies `--max-wait`, drains on shutdown ([Stopping](#stopping)) |
-| `internal/route` | Routing variables (one per kind of job) and heartbeat, sending queued jobs back to GitHub, the watchdog workflow |
+| `internal/route` | Routing variables (one per kind of job), per-OS heartbeats and which machine owns them, sending queued jobs back to GitHub, the watchdog workflow |
 | `internal/ghapp` | `spareci watchdog --setup`: creates the watchdog's GitHub App through the manifest flow and stores its secrets |
 | `internal/service` | `spareci install`: launchd agent (macOS), systemd user unit (Linux) |
 | `internal/runner` | Backends that run one runner per job, behind the `Backend` interface. `Host`: installs `actions/runner`, clones it per job, runs it with the job's home and environment, patches the worker for the cache. `Container`: Linux jobs in a fresh container each ([linux-containers.md](linux-containers.md)) |
@@ -41,9 +41,7 @@ On start, `pool.Assign` gives each backend the kinds of jobs it takes: macOS to 
 
 Why per OS, and why architecture only for Linux: one variable meant a Linux job opted in on a Mac ran on macOS, and a Mac with containers needs to say separately whether it takes Linux jobs. `ubuntu-24.04` and `ubuntu-24.04-arm` are GitHub's own split, so the variable follows the fallback label and the workflow change stays one line. macOS has one variable because a Mac runs one architecture natively and Intel `macos-13` jobs are rare; `spareci init` marks them "maybe" on Apple Silicon.
 
-Every variable shares one heartbeat (`SPARECI_HEARTBEAT`), and they go on and off together: start, `^C`, laptop mode and the watchdog all act on the whole set.
-
-**Known limitation: one machine per repo.** The variables and the heartbeat belong to the repo, not to a machine. If two machines run `spareci up` for the same repo (say a Mac and a Linux box both taking Linux x64 jobs), the one that stops or pauses deletes the shared variables and the heartbeat while the other is still up. The other sets them again on its next heartbeat, within a minute, and runs created in that gap go to GitHub-hosted runners, which is the safe direction. The watchdog also can't tell which machine died. Running several machines for one repo (a fleet) is future work.
+Each OS's variables have their own heartbeat (`SPARECI_HEARTBEAT_MACOS`, `SPARECI_HEARTBEAT_LINUX`), naming the machine that serves them, so two machines can split a repo by OS ([Several machines per repo](#several-machines-per-repo)). A machine's variables go on and off together: start, `^C`, laptop mode and the watchdog act on all of that machine's variables and no other machine's.
 
 **When GitHub reads `vars`.** Once per run attempt, when the attempt is created, and not again when a job becomes ready. Checked on 2026-11-10 with a probe workflow (run 42887218442): with the variable set to a label no runner has, a job that `needs:` a 75-second job still got that label after the variable had been deleted during the wait. After a cancel and `rerun-failed-jobs`, attempt 2 read the deleted variable and ran on `ubuntu-24.04`. `rerun-failed-jobs` includes cancelled jobs. So clearing the variable only affects new runs and new attempts, and a job already queued for this machine stays queued until something re-runs it.
 
@@ -60,6 +58,42 @@ This happens in three places:
 - **Shutdown** (`^C`, SIGTERM, `spareci uninstall`, `spareci down`). While running jobs drain, a run with a job queued here is sent back as soon as no job in it is in progress. When the drain ends, every run with a job still queued here is sent back, even if other jobs in it are running, and so is every run whose job was stopped ([Stopping](#stopping)). `spareci down` and `uninstall` also re-run any run with a job still in progress on one of this machine's runners that is offline or gone, which is what a killed spareci leaves behind.
 - **The watchdog workflow**, when the daemon is dead.
 
+### Several machines per repo
+
+Several machines can serve one repo when each takes different operating systems: for example macOS jobs on a Mac mini and Linux jobs on a Linux server. Two machines can't share one OS: per-machine queues and load balancing are future work.
+
+**What a machine serves.** `--os macos|linux` (repeatable, or comma-separated) picks the OSes a machine takes. The default is everything it can run, as before 0.3: macOS on a Mac, Linux on a Linux machine or on a Mac with a container runtime. A Mac with `--os macos` builds no container backend; `--os linux` on it runs only Linux jobs, in containers. Asking for an OS the machine can't run is an error at start.
+
+**Groups.** The routing variables fall into groups, one per heartbeat (`route.Groups`):
+
+| Group | Routing variables | Heartbeat | Owned by |
+|---|---|---|---|
+| macOS | `SPARECI_RUNS_ON_MACOS` | `SPARECI_HEARTBEAT_MACOS` | the machine serving macOS |
+| Linux | `SPARECI_RUNS_ON_LINUX`, `SPARECI_RUNS_ON_LINUX_ARM` | `SPARECI_HEARTBEAT_LINUX` | the machine serving Linux |
+| Old shared variable | `SPARECI_RUNS_ON` | `SPARECI_HEARTBEAT` | a machine started without `--os` |
+
+A machine sets, re-asserts, clears and pauses (laptop mode) only its own groups' variables, and writes only its own heartbeats. The Linux group covers both architectures because `--os` is per OS: one machine serves all of a repo's Linux jobs it can run. Within a group, a variable is set only for the kinds of jobs the machine has a backend for, as before.
+
+**Heartbeat value.** `<unix time>|<cron>|...|<machine>`: the lease the watchdog reads (below), then the name of the machine that wrote it. `--name` sets the name (default: the host name up to the first dot); it also starts the machine's runner names (`spareci-<name>-...`), which is how `spareci down` tells its own runners from another machine's. 0.2 wrote `<unix time>|<cron>|...|`, which parses as a heartbeat with no name.
+
+**Who owns a group.** A heartbeat younger than 5 minutes (`route.StaleAfter`, the age at which the watchdog acts) means the machine it names is up and owns that group (`route.Owners`). So:
+
+- **Start:** before setting anything, `spareci up` reads the heartbeat of every group it would own. If one is fresh and names another machine, it refuses to start: `Server is serving Linux jobs for owner/repo (heartbeat 20s ago). Stop it there, or start this machine with --os macos.` A heartbeat with this machine's own name is a restart after a crash, and fine.
+- **While up:** every heartbeat first reads the heartbeat it's about to overwrite. If another machine wrote it since the last beat, both are serving the same OS (they started at the same moment, or one was paused when the other started). spareci logs an error naming the other machine every minute until one stops; it keeps running, because stopping either would leave jobs queued for it.
+- **Laptop mode resume** checks like a start: while another machine holds the group, routing stays off, with a warning.
+- **Stop** (`^C`, laptop mode pause, `spareci down`, `uninstall`) clears a group only if its heartbeat is stale, missing or this machine's own. A group another machine holds is left alone, and `down` doesn't send back jobs queued for that group's labels.
+
+**The old variable.** `SPARECI_RUNS_ON` (0.1) has no OS of its own: it routes to the host's native OS. Only a machine started without `--os` owns it, and with it the old heartbeat `SPARECI_HEARTBEAT`, so a 0.2 setup keeps working with nothing changed: the same variables are set, and `SPARECI_HEARTBEAT` is still written, so a watchdog generated by 0.2 keeps skipping its firings until it's regenerated. Machines that split a repo by OS all use `--os` and leave `SPARECI_RUNS_ON` unset; a workflow line still using it falls back to GitHub-hosted runners, and `spareci init` upgrades it. A machine started with `--os` checks two more things at start:
+
+- A fresh `SPARECI_HEARTBEAT` with no name is a spareci older than 0.3, which takes every OS: it refuses to start until that one is upgraded or stopped. (A machine without `--os` reads a nameless heartbeat as its own previous version, as when upgrading in place.)
+- A watchdog workflow on the default branch that doesn't know the per-OS heartbeats (one from 0.2) would see the routing variables set with no `SPARECI_HEARTBEAT` and clear them every five minutes: it refuses to start until the workflow is regenerated with `spareci watchdog`.
+
+**Rescues** clear only this machine's own variables while creating the re-run, so jobs of the same run routed to another machine are re-run with that machine's variable still set and go back to it. Cancelling is per run on GitHub, so cancelling a run also cancels another machine's job in it: a rescue that isn't forced already skips a run with any job in progress, and at shutdown spareci now keeps waiting, up to the drain timeout, for jobs in progress elsewhere in a run that has a job queued here, rather than force-cancelling them as soon as its own jobs are done.
+
+**The watchdog** (below) acts per group. Its job runs when some group has a variable set and a heartbeat that doesn't list the firing; the job then checks each group's heartbeat age, deletes the variables and heartbeat of only the stale groups, names the machine that stopped beating, and re-runs runs with jobs queued for those groups' labels. A live machine's group is left alone.
+
+**Two processes on one machine.** spareci keeps per-repo state (its pid file, runner copies, crash cleanup) under its cache root, so two `spareci up` for one repo on one machine would clean up each other's jobs. `SPARECI_ROOT` moves the cache root; with it and different `--name`s, one machine can run `--os macos` and `--os linux` as separate processes, which is how the split was tested. Job containers are labelled by repo, not by root, so only one of them may run Linux jobs. One process with both OSes is the normal setup.
+
 ### Crash-safe routing
 
 If the daemon dies without `^C`, nothing on the machine can clear the variable, so the safety net has to run somewhere else. Options considered:
@@ -74,13 +108,13 @@ If the daemon dies without `^C`, nothing on the machine can clear the variable, 
 
 The chosen design keeps the one-line workflow change and costs nothing while things work. Its price is the recovery delay and a credential that can write variables (below). `spareci install` covers the common crash case in seconds anyway, and the watchdog covers a machine that's off.
 
-**How the lease works.** `spareci watchdog` prints a workflow with 12 cron firings an hour, at minutes 2, 7, ..., 57 (off the top of the hour, when GitHub's scheduler is busiest). GitHub passes the firing's cron string to the run as `github.event.schedule`. Every minute the daemon writes `SPARECI_HEARTBEAT` as `<unix time>|<cron>|<cron>|...|`, listing the firings from 30 minutes ago to 10 minutes ahead. The watchdog job's condition is:
+**How the lease works.** `spareci watchdog` prints a workflow with 12 cron firings an hour, at minutes 2, 7, ..., 57 (off the top of the hour, when GitHub's scheduler is busiest). GitHub passes the firing's cron string to the run as `github.event.schedule`. Every minute the daemon writes each of its heartbeats (`SPARECI_HEARTBEAT_MACOS`, `SPARECI_HEARTBEAT_LINUX`, and `SPARECI_HEARTBEAT` for the old variable) as `<unix time>|<cron>|<cron>|...|<machine>`, listing the firings from 30 minutes ago to 10 minutes ahead. The watchdog job's condition has one clause per group:
 
 ```yaml
-if: (vars.SPARECI_RUNS_ON_MACOS || vars.SPARECI_RUNS_ON_LINUX || vars.SPARECI_RUNS_ON_LINUX_ARM || vars.SPARECI_RUNS_ON) && !contains(vars.SPARECI_HEARTBEAT, format('|{0}|', github.event.schedule))
+if: ((vars.SPARECI_RUNS_ON_MACOS) && !contains((vars.SPARECI_HEARTBEAT_MACOS || vars.SPARECI_HEARTBEAT), format('|{0}|', github.event.schedule))) || ((vars.SPARECI_RUNS_ON_LINUX || vars.SPARECI_RUNS_ON_LINUX_ARM) && !contains((vars.SPARECI_HEARTBEAT_LINUX || vars.SPARECI_HEARTBEAT), format('|{0}|', github.event.schedule))) || ((vars.SPARECI_RUNS_ON) && !contains(vars.SPARECI_HEARTBEAT, format('|{0}|', github.event.schedule)))
 ```
 
-so it's skipped, and isn't billed, whenever routing is off or the firing is listed. While the daemon is alive, every firing is listed unless GitHub starts it more than 30 minutes late. When the daemon dies, the list freezes and a firing at most 15 minutes later is unlisted. The job then checks the timestamp itself and only acts if it's at least 5 minutes old. When it acts, it deletes every routing variable that is set and the heartbeat with the app token (or `SPARECI_TOKEN`, see below), then cancels and re-runs every run with a job queued for any of their labels, using the rules above. The workflow's `GITHUB_TOKEN` (`actions: write`) is enough for that part. A daemon that comes back, for example a laptop waking up, sets its variables again on its next heartbeat.
+so it's skipped, and isn't billed, whenever every routed group lists the firing. An OS group without a heartbeat of its own reads `SPARECI_HEARTBEAT`, because spareci 0.2 sets the per-OS variables but writes only that one: the new workflow can be merged before the machines are upgraded. A 0.3 machine writes its heartbeats before it sets its variables, so it never leaves an OS's variable set without that OS's heartbeat. One job covers every group, so a run with jobs for two dead groups is cancelled and re-run once, after both groups' variables are cleared. While the daemon is alive, every firing is listed unless GitHub starts it more than 30 minutes late. When the daemon dies, the list freezes and a firing at most 15 minutes later is unlisted. The job then checks each routed group's timestamp itself and only acts on groups whose heartbeat is at least 5 minutes old (or missing), naming the machine that stopped beating. For those it deletes the routing variables that are set and the heartbeat with the app token (or `SPARECI_TOKEN`, see below), then cancels and re-runs every run with a job queued for any of their labels, using the rules above. A live machine's group keeps its variables, so its jobs in those runs go back to it. Cancelling is per run, so a job of a live machine that is running in such a run is cancelled and repeated; the watchdog only acts during an outage. The workflow's `GITHUB_TOKEN` (`actions: write`) is enough for that part. A daemon that comes back, for example a laptop waking up, sets its variables again on its next heartbeat.
 
 `workflow_dispatch` runs always reach the check, which is how to test it by hand. Verified live on 2026-11-10: with a 51-second-old heartbeat the watchdog left routing alone (run 42893719071). After a `kill -9` and a heartbeat more than 5 minutes old, it cleared routing and re-ran a run stranded on the dead machine (42895780440 rescuing 42894946226), which then passed on `ubuntu-24.04`. Those runs were dispatched by hand, because scheduled workflows only run from the default branch. The lease that picks which scheduled firings run is covered by unit tests.
 
@@ -115,9 +149,9 @@ To remove it: delete the app under the account's Settings → Developer settings
 
 The pool asks the gate once per poll, before spawning (`internal/pool/gate.go`):
 
-- **Open → closed:** `Router.Stop` deletes every routing variable and the heartbeat. Runners that haven't started a job are cancelled, and none are spawned. Running jobs continue. Each poll while closed, runs with a job queued here are sent back with `Router.Rescue` (not forced), so a run with a job in progress waits for it, like `--max-wait`.
-- **Closed → open:** `Router.Start` sets the routing variables and heartbeat again, and spawning resumes.
-- **Watchdog:** routing and the heartbeat go off together, exactly as after `^C`. The watchdog's `if:` needs a routing variable, so it's skipped while paused, and there is nothing for it to rescue. The heartbeat loop only writes while the router is on, so it can't turn routing back on during a pause.
+- **Open → closed:** `Router.Stop` deletes this machine's routing variables and heartbeats. Runners that haven't started a job are cancelled, and none are spawned. Running jobs continue. Each poll while closed, runs with a job queued here are sent back with `Router.Rescue` (not forced), so a run with a job in progress waits for it, like `--max-wait`.
+- **Closed → open:** `Router.Start` sets the routing variables and heartbeats again, and spawning resumes. If another machine took one of this machine's OSes while it was paused, `Start` refuses as at start-up ([Several machines per repo](#several-machines-per-repo)), and routing stays off with a warning each poll until one of them stops.
+- **Watchdog:** a group's routing and heartbeat go off together, exactly as after `^C`. The watchdog's `if:` needs a group's routing variable, so it's skipped while paused, and there is nothing for it to rescue. The heartbeat loop only writes while the router is on, so it can't turn routing back on during a pause.
 - A failed routing change is retried on the next poll, and runs aren't rescued until routing is really off (a re-run made while it's on would come straight back). A probe that fails mid-run keeps its last reading, with one warning; at start, `spareci up` refuses a condition it can't measure.
 - If the gate is closed at start, routing isn't started, and it's stopped instead in case a crash left it on.
 
@@ -141,7 +175,7 @@ Each repo gets its own `spareci up` (or service), and they share the cache root.
 Stopping spareci, by `^C`, SIGTERM from a service manager, `spareci uninstall` or a reinstall, never leaves a job stranded on GitHub (`pool.Pool.drain`):
 
 1. Routing goes off, so new runs go to GitHub-hosted runners, and runners that haven't taken a job are stopped.
-2. Runs with a job queued here are sent back to GitHub at once, unless a job in the run is in progress: cancelling would throw that work away, so they're retried every 5 seconds and go back when it ends.
+2. Runs with a job queued here are sent back to GitHub at once, unless a job in the run is in progress: cancelling would throw that work away, so they're retried every 5 seconds and go back when it ends. That includes a job running elsewhere, on another machine (a repo split by OS) or on GitHub: spareci keeps waiting for it after its own jobs are done, until the drain timeout.
 3. Running jobs get up to `--drain-timeout` (default 10 minutes) to finish.
 4. After that, or on a second `^C`, every runner is stopped with SIGINT (`docker stop` for a container). The runner cancels its job and reports it before exiting, so GitHub marks the job completed within seconds. A killed runner can't report anything: GitHub keeps its job in progress until it notices the runner is gone, which took several minutes on 2026-11-11 (Row-Labs/relay, when the service was stopped by `launchctl bootout` and killed after a 60-second `ExitTimeOut`), and a cancel or re-run of the run waits on it ("This workflow is already running"). Measured on 2026-11-11 (Row-Labs/spareci run 43126229214, `spareci uninstall --drain-timeout 1s` with two Linux container jobs running): GitHub showed both jobs completed within 4 seconds of the SIGINT, the run completed 4 seconds later, and its re-run was queued on `ubuntu-24.04` 3 seconds after that; the uninstall took 19 seconds. Cancelling the run through the API while its runners were alive was no faster (5 seconds, run 43126404180), and it only works while the runner is alive to hear it, so spareci uses SIGINT and then cancels and re-runs. Before stopping the runners, spareci notes each job's run, by the job's name from the last poll when that's unambiguous and otherwise by looking up which job lists the runner's name.
 5. Those runs are cancelled and re-run on GitHub-hosted runners (`Router.Rescue` with force, as for queued jobs), and jobs still queued here are sent back. A re-run GitHub refuses as "already running" is retried while the run finishes cancelling, for up to 3 minutes.
