@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -305,7 +306,7 @@ func TestLateFiringIsCoveredWhileAlive(t *testing.T) {
 func TestWatchdogWorkflow(t *testing.T) {
 	w := Watchdog(Vars(DefaultBase), "SPARECI_HEARTBEAT")
 	for _, m := range Slots() {
-		if !strings.Contains(w, fmt.Sprintf("- cron: '%s'", Cron(m))) {
+		if !strings.Contains(w, fmt.Sprintf("- cron: \"%s\"", Cron(m))) {
 			t.Errorf("missing cron for minute %d", m)
 		}
 	}
@@ -449,5 +450,20 @@ func TestNames(t *testing.T) {
 	}
 	if got := Routes("", "spareci", Targets, true); got != nil {
 		t.Errorf("empty base routes %v", got)
+	}
+}
+
+// The generated file passes prettier --check with Prettier's defaults, so a
+// repo that checks formatting accepts it as written. The golden file was
+// checked with: npx prettier@3.6.2 --check internal/route/testdata/spareci-watchdog.yml
+// Regenerate it with: go run ./cmd/spareci watchdog > internal/route/testdata/spareci-watchdog.yml
+// and check it with Prettier again.
+func TestWatchdogGolden(t *testing.T) {
+	want, err := os.ReadFile("testdata/spareci-watchdog.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := Watchdog(Vars(DefaultBase), "SPARECI_HEARTBEAT"); got != string(want) {
+		t.Errorf("watchdog workflow differs from testdata/spareci-watchdog.yml; regenerate it and check it with Prettier")
 	}
 }

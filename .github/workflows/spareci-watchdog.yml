@@ -24,18 +24,18 @@ name: spareci watchdog
 
 on:
   schedule:
-    - cron: '2 * * * *'
-    - cron: '7 * * * *'
-    - cron: '12 * * * *'
-    - cron: '17 * * * *'
-    - cron: '22 * * * *'
-    - cron: '27 * * * *'
-    - cron: '32 * * * *'
-    - cron: '37 * * * *'
-    - cron: '42 * * * *'
-    - cron: '47 * * * *'
-    - cron: '52 * * * *'
-    - cron: '57 * * * *'
+    - cron: "2 * * * *"
+    - cron: "7 * * * *"
+    - cron: "12 * * * *"
+    - cron: "17 * * * *"
+    - cron: "22 * * * *"
+    - cron: "27 * * * *"
+    - cron: "32 * * * *"
+    - cron: "37 * * * *"
+    - cron: "42 * * * *"
+    - cron: "47 * * * *"
+    - cron: "52 * * * *"
+    - cron: "57 * * * *"
   workflow_dispatch:
 
 permissions:

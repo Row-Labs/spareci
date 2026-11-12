@@ -27,8 +27,23 @@ import (
 // reaches (DOCKER_HOST or the current docker context: OrbStack, Docker
 // Desktop, Colima, Docker Engine). See docs/linux-containers.md.
 
-//go:embed image/Dockerfile image/entrypoint.sh
+//go:embed image/Dockerfile image/entrypoint.sh image/dockerproxy/main.go
 var imageFS embed.FS
+
+// imageFiles are the build context, as paths under image/.
+var imageFiles = []string{"Dockerfile", "entrypoint.sh", "dockerproxy/main.go"}
+
+// Paths in the job's container (see image/entrypoint.sh).
+const (
+	// jobHome is HOME, and the mount point of the job's work volume in
+	// socket mode, so the workspace and HOME share a filesystem as on a
+	// hosted runner (pnpm puts its store at the root of the project's
+	// filesystem otherwise).
+	jobHome = "/home/runner"
+	// daemonSocketMount is where the runtime's socket is mounted. Jobs talk
+	// to the proxy in front of it at /var/run/docker.sock.
+	daemonSocketMount = "/run/spareci/docker.sock"
+)
 
 // Docker access for jobs in containers (Container.DockerMode).
 const (
@@ -105,6 +120,8 @@ type Container struct {
 	Git    *gitmirror.Mirror
 	Docker Docker // nil: DockerCLI
 
+	testMounts []string // extra -v mounts, for tests
+
 	image      string // tag of the built image; set by Prepare
 	dockerRoot string // the daemon's data directory; set by Prepare
 	socket     string // the daemon's socket, as a path on the daemon's host; set by Prepare
@@ -150,11 +167,12 @@ func platform(arch string) string {
 	return "linux/arm64"
 }
 
-// imageContext is the build context: the Dockerfile and the entrypoint.
+// imageContext is the build context: the Dockerfile, the entrypoint and the
+// docker proxy's source.
 func imageContext() ([]byte, error) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	for _, name := range []string{"Dockerfile", "entrypoint.sh"} {
+	for _, name := range imageFiles {
 		b, err := imageFS.ReadFile("image/" + name)
 		if err != nil {
 			return nil, err
@@ -170,11 +188,11 @@ func imageContext() ([]byte, error) {
 }
 
 // ImageTag names the image for a runner version and architecture. It changes
-// whenever the Dockerfile or entrypoint does, which is what triggers a
+// whenever the Dockerfile, entrypoint or proxy source does, which is what triggers a
 // rebuild.
 func ImageTag(version, arch string) string {
 	h := sha256.New()
-	for _, name := range []string{"Dockerfile", "entrypoint.sh"} {
+	for _, name := range imageFiles {
 		b, _ := imageFS.ReadFile("image/" + name)
 		fmt.Fprintf(h, "%s\x00%d\x00", name, len(b))
 		h.Write(b)
@@ -239,7 +257,7 @@ func (c *Container) Prepare(ctx context.Context, buildLog io.Writer) error {
 			return fmt.Errorf("%w: %v", ErrNoRuntime, err)
 		}
 		c.dockerRoot = strings.TrimSpace(string(out))
-		if !path.IsAbs(c.dockerRoot) {
+		if !path.IsAbs(c.dockerRoot) || strings.ContainsAny(c.dockerRoot, " \t=") {
 			return fmt.Errorf("docker info: unexpected data directory %q", c.dockerRoot)
 		}
 	}
@@ -407,19 +425,40 @@ func (c *Container) runArgs(name, envFile, workVol string) []string {
 		}
 	}
 	if c.DockerMode == DockerSocket {
-		// The runner lives in a volume mounted at the path the daemon
-		// stores it at, so the paths it bind-mounts (the workspace into a
-		// container: job, externals for its node) exist on the daemon too.
-		root := c.workRoot(workVol)
+		// HOME, the runner and its workspace live in the job's own volume,
+		// mounted at the same path in every job, so paths a job sees (and
+		// caches keyed on them) don't change from job to job. The daemon
+		// resolves bind mounts on its own host, where the volume is
+		// somewhere else: the proxy in front of the socket rewrites them.
 		args = append(args,
-			"-v", c.socket+":/var/run/docker.sock",
-			"-v", workVol+":"+root,
-			"-e", "SPARECI_RUNNER_ROOT="+root)
+			"-v", c.socket+":"+daemonSocketMount,
+			"-v", workVol+":"+jobHome,
+			"-e", "SPARECI_DOCKER_MAP="+strings.Join(c.dockerMaps(workVol), " "))
+	}
+	for _, m := range c.testMounts {
+		args = append(args, "-v", m)
 	}
 	return append(args, c.image)
 }
 
-func (c *Container) workRoot(vol string) string {
+// dockerMaps are the proxy's path rewrites for a job: paths in its container
+// that are bind-mountable, to where the daemon sees them.
+func (c *Container) dockerMaps(workVol string) []string {
+	maps := []string{
+		jobHome + "=" + c.volumePath(workVol),
+		// The runner mounts the tool cache into container: jobs (/__t).
+		"/opt/hostedtoolcache=" + c.volumePath(c.ToolCacheVolume()),
+	}
+	if c.socket != "/var/run/docker.sock" {
+		// The runner mounts the socket into container actions by this
+		// path; on the daemon's host it is elsewhere (rootless Docker).
+		maps = append(maps, "/var/run/docker.sock="+c.socket)
+	}
+	return maps
+}
+
+// volumePath is where the daemon stores a volume's data.
+func (c *Container) volumePath(vol string) string {
 	return path.Join(c.dockerRoot, "volumes", vol, "_data")
 }
 

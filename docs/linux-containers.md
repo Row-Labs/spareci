@@ -8,7 +8,22 @@ A Mac takes Linux jobs as well as macOS ones: macOS jobs run natively as before,
 2. **Per job**: write the JIT config and the job's environment to a `0600` env file (secrets stay off docker's command line), then `docker run` a container named after the runner. Its output is the runner's, parsed exactly as on the host. When the runner exits, the container (`docker rm -f -v`) and its work volume are removed.
 3. **Stop**: `docker stop` sends `SIGINT` (`--stop-signal`), which the runner treats as "finish up and deregister", then `SIGKILL` after 30 seconds (`--stop-timeout`). `tini -g` is PID 1, so the signal reaches the runner's whole process group.
 
-Inside, an entrypoint running as root chooses the runner install, gives the `runner` user (uid 1001, passwordless sudo, as on GitHub's images) the docker socket's group, and starts `run.sh --jitconfig` as that user. The JIT config is removed from the environment first, so steps don't see it.
+Inside, an entrypoint running as root chooses the runner install, copies it to `/home/runner/actions-runner`, starts the docker proxy if the runtime's socket is mounted (below), and starts `run.sh --jitconfig` as the `runner` user (uid 1001, passwordless sudo, as on GitHub's images). The JIT config is removed from the environment first, so steps don't see it.
+
+### Paths are the same in every job
+
+Every job of a repo sees the same paths, as on a hosted runner, where they are `/home/runner/work/<repo>/<repo>` with HOME on the same disk:
+
+| | Path |
+|---|---|
+| `HOME` | `/home/runner` |
+| Workspace (`GITHUB_WORKSPACE`) | `/home/runner/actions-runner/_work/<repo>/<repo>` |
+| `pnpm store path` | `/home/runner/.local/share/pnpm/store/v<N>` |
+| `npm config get cache` | `/home/runner/.npm` |
+| `go env GOMODCACHE` | `/home/runner/go/pkg/mod` |
+| Tool cache | `/opt/hostedtoolcache` |
+
+This matters for caches: `actions/cache` makes a cache entry's version from its paths, so a path that changes from job to job never restores. pnpm puts its store at the root of the filesystem that holds the project when HOME is on another one, and `setup-node` caches that path. When each job's workspace was a volume mounted at its own daemon path (`/var/lib/docker/volumes/spareci-job-<runner>/_data`), the store path was different in every job and the pnpm cache never hit. Now the job's volume is mounted at `/home/runner`, so HOME and the workspace share a filesystem and every path is fixed. Concurrent jobs are still isolated: each has its own container and its own volume at that path. Measured with `TestContainerPathsE2E` (two jobs at once).
 
 What persists between jobs:
 
@@ -18,7 +33,7 @@ What persists between jobs:
 | Git mirror | the host's mirror and its template, bind-mounted read-only at their own paths | Checkouts borrow objects exactly as on the host. The template's hook copies them in after checkout. |
 | Local cache | the host's cache server | Reached as `host.docker.internal` (below). |
 
-Everything else, `HOME` included, starts empty each job, like a hosted runner.
+Everything else, `HOME` included, starts fresh each job (from the image's `/home/runner`), like a hosted runner.
 
 ## Runtime
 
@@ -41,17 +56,19 @@ The `Docker` interface is small (run to completion, stream a run), so a `contain
 
 `internal/runner/image/Dockerfile`, embedded in the binary and built locally on first use: `docker build --platform linux/<arch>` with the Dockerfile and entrypoint as a tar context on stdin. Nothing is pulled except `ubuntu:24.04` and the packages, and nothing is pushed to any registry.
 
-- **Tag:** `spareci-runner:<runner version>-<arch>-<hash of the Dockerfile and entrypoint>`. A new runner version or a changed Dockerfile is a new tag, which triggers a build. Older spareci images for that architecture are removed after a successful build.
+- **Tag:** `spareci-runner:<runner version>-<arch>-<hash of the Dockerfile, entrypoint and proxy source>`. A new runner version or a changed Dockerfile is a new tag, which triggers a build. Older spareci images for that architecture are removed after a successful build.
 - **Size:** 1.7 GB (arm64), 2.0 GB (x64).
 - **Cold build on an M-series Mac with OrbStack:** about 1m10s arm64, about 2m45s x64 (Rosetta). A rebuild after a small change reuses Docker's layer cache: under a minute.
-- **Contents:** Ubuntu 24.04; actions/runner for the architecture with its dependencies (`installdependencies.sh`); git, git-lfs, curl, wget, jq, unzip, zip, xz, zstd (`actions/cache` uses it), bzip2, rsync, openssh-client, build-essential, pkg-config, python3 with pip and venv, sudo, locales (`LANG=C.UTF-8`), tzdata, the docker CLI with buildx and compose, the `gh` CLI, and basic network tools. `ImageOS=ubuntu24` is set, as some `setup-*` actions read it.
+- **Contents:** Ubuntu 24.04; actions/runner for the architecture with its dependencies (`installdependencies.sh`); git, git-lfs, curl, wget, jq, unzip, zip, xz, zstd (`actions/cache` uses it), bzip2, rsync, openssh-client, build-essential, pkg-config, python3 with pip and venv, sudo, locales (`LANG=C.UTF-8`), tzdata, the docker CLI with buildx and compose, the `gh` CLI, basic network tools, and `spareci-dockerproxy` (built in a `golang` stage from `image/dockerproxy/main.go`, for the target from the build machine's platform). `ImageOS=ubuntu24` is set, as some `setup-*` actions read it.
 - **The patched worker:** `/opt/runner-cache` is a hard-linked copy of `/opt/runner` whose `Runner.Worker.dll` has the same `ACTIONS_RESULTS_URL` rename as on the host ([how-it-works.md](how-it-works.md#local-cache)). The entrypoint uses it only when the job has the local cache. If a runner release drops the string, the image has no patched copy and jobs use GitHub's cache, as on the host.
 
 ### Missing compared with GitHub's `ubuntu-24.04`
 
+Node.js (the latest release of an LTS line, currently 24) **is** on PATH, as on GitHub's image: some actions run before `setup-node` and need a `node` binary, `pnpm/action-setup` among them. Jobs that need a specific version still use `setup-node`.
+
 GitHub's image is tens of GB with hundreds of tools. Jobs that use `setup-*` actions work the same here. Jobs that assume a preinstalled tool fail with "command not found" until they add the setup step. Not included:
 
-- **Language runtimes on PATH:** Node.js (GitHub's has Node 20 without `setup-node`), Go, Java, .NET, Ruby, PHP, Rust (rustup), Swift, Kotlin, Julia, Haskell, and the pre-populated tool cache. Use `setup-node`, `setup-go`, `setup-java`, `dtolnay/rust-toolchain` and so on. The tool cache volume keeps them after the first job.
+- **Language runtimes on PATH:** Go, Java, .NET, Ruby, PHP, Rust (rustup), Swift, Kotlin, Julia, Haskell, and the pre-populated tool cache. Use `setup-node`, `setup-go`, `setup-java`, `dtolnay/rust-toolchain` and so on. The tool cache volume keeps them after the first job.
 - **Package managers:** yarn, pnpm, pipx, Homebrew, conda.
 - **Compilers and build tools:** clang/LLVM, gfortran, cmake, ninja, bazel.
 - **Browsers:** Chrome, Firefox, Edge and their drivers. Playwright and Puppeteer install their own.
@@ -104,7 +121,11 @@ The cost is correctness for the jobs that do care. A job that downloads an x64-o
 
 The socket is the default because spareci already runs jobs with the user's own Docker on the host (see the README's Security section), so it adds no new exposure for the private, trusted repos spareci supports today. Public repos need real isolation first ([isolation.md](isolation.md)). Use `DockerNone` there, or a VM backend.
 
-**Paths.** The runner bind-mounts host paths into the containers it starts: the workspace into a `container:` job (`/__w`), its node into it (`/__e`), and steps' own `docker run -v $PWD:...`. With the socket passed through, those paths are resolved on the daemon's host, not in the job's container. So in socket mode the runner doesn't run from the image. Each job gets a volume, `spareci-job-<runner>`, mounted at the path where the daemon stores it (`<DockerRootDir>/volumes/<name>/_data`, from `docker info`), and the entrypoint copies the runner there and runs it from there. Every path under the runner then exists at the same path for the daemon. The copy takes 1.5–2.2s per job.
+**Paths.** The runner bind-mounts paths into the containers it starts: the workspace into a `container:` job (`/__w`), its node (`/__e`) and the tool cache (`/__t`) into it, and steps do their own `docker run -v $PWD:...` or `docker compose` with `./:/app`. With the socket passed through, the daemon resolves those paths on its own host, not in the job's container. Each job gets a volume, `spareci-job-<runner>`, mounted at `/home/runner`; on the daemon's host it is at `<DockerRootDir>/volumes/<name>/_data` (from `docker info`), a different path for every job.
+
+So jobs don't get the socket itself. It is mounted at `/run/spareci/docker.sock`, and `spareci-dockerproxy` (`internal/runner/image/dockerproxy`, built into the image) listens at `/var/run/docker.sock` in front of it. It passes the Docker API through unchanged, except that in `POST /containers/create` (`HostConfig.Binds`, bind `HostConfig.Mounts`) and bind volumes (`POST /volumes/create`, `device`), sources under `/home/runner` are rewritten to the job's volume on the daemon, and `/opt/hostedtoolcache` to the tool cache volume. Because it works at the API, it covers the runner, the docker CLI, `docker compose` and SDKs (testcontainers, docker-py) alike. Attach and exec connections are passed through as raw streams, half-close included, so `docker run -i` gets its stdin EOF. `docker inspect` still shows the daemon-side paths. A path outside those two (`-v /tmp/x:/x`) is resolved on the daemon's host, as before.
+
+The entrypoint copies the runner into `/home/runner/actions-runner` (1.5–2.2s per job), in both docker modes, so the workspace is at the same path in both.
 
 **The socket.** On macOS it is `/var/run/docker.sock` inside the runtime's VM, which is where OrbStack, Docker Desktop and Colima put it. On Linux it is the socket the CLI uses (`DOCKER_HOST` or the current context, so rootless Docker works). A daemon reached over TCP gets no passthrough: jobs run without docker, with a warning.
 
@@ -123,4 +144,8 @@ On Linux, `127.0.0.1` on the host is out of a container's reach. Until the cache
 ## Testing
 
 - `go test -short ./internal/runner`: the container backend against a fake runtime (build once per tag, pruning, a missing or unusable runtime, run arguments, env file and URL rewriting, cancel, cleanup).
+- `go test ./internal/runner/image/dockerproxy`: the proxy against a fake daemon (bind rewriting, pass-through, streaming, upgrade with half-close).
 - `SPARECI_TEST_CONTAINER=1 go test ./internal/runner -run TestContainerE2E -v -timeout 30m`: builds the image for each architecture this machine offers against the real runtime, checks the tools and the patched worker in it, and runs a runner with a JIT config GitHub rejects, checking that the container and its volume are removed.
+- `SPARECI_TEST_CONTAINER=1 go test ./internal/runner -run TestContainerPathsE2E -v -timeout 30m`: runs two jobs at once through the real entrypoint and proxy, with a stand-in for the runner. Both must see the same `pwd`, `$HOME`, `pnpm store path`, `npm config get cache` and `go env GOMODCACHE`; neither may see the other's workspace; and `docker run -v $PWD`, the runner's `/__w` and `/__t` mounts, `docker compose`, `docker build` and `docker run -i` must reach the job's own files.
+
+Building a new image removes older spareci images for that architecture that no container is using, so running the e2e tests on a machine that also runs `spareci up` can remove the image that service is using if none of its jobs is running at that moment. Its next Linux job then fails to start (`docker run --pull never`) until the service is restarted and rebuilds it. Use a different `SPARECI_RUNNER_VERSION` for the tests on such a machine, or run them while it is down.
