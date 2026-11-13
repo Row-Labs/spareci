@@ -636,12 +636,13 @@ func (p *Pool) drain(hardCtx context.Context) error {
 		}
 		if busy > 0 {
 			slog.Info("waiting for running jobs to finish (^C again to stop them)", "jobs", busy)
+			waiting = 0
 		} else if elsewhere != waiting {
 			// Cancelling is per run: sending a queued job back now would
 			// cancel a job running on another machine or on GitHub.
 			slog.Info("waiting for jobs running elsewhere in runs with a job queued here; those go back to GitHub when they finish (^C again to cancel them now)", "runs", elsewhere)
+			waiting = elsewhere
 		}
-		waiting = elsewhere
 		select {
 		case <-hardCtx.Done():
 		case <-time.After(drainPoll):
