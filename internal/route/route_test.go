@@ -53,6 +53,12 @@ func (f *fake) SetVariable(_ context.Context, _, name, value string) error {
 	return nil
 }
 
+func (f *fake) GetVariable(_ context.Context, _, name string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.vars[name], nil
+}
+
 func (f *fake) DeleteVariable(_ context.Context, _, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -124,7 +130,8 @@ func (f *fake) RerunFailedJobs(context.Context, string, int64) error { return f.
 func (f *fake) RerunRun(context.Context, string, int64) error        { return f.rerun("rerun-all") }
 
 func router(f *fake) *Router {
-	return &Router{API: f, Repo: "o/r", Routes: []Route{{"SPARECI_RUNS_ON", "spareci"}}, HeartbeatVar: "SPARECI_HEARTBEAT", Poll: time.Millisecond}
+	return &Router{API: f, Repo: "o/r", Machine: "mac", Poll: time.Millisecond,
+		Groups: []Group{{Heartbeat: "SPARECI_HEARTBEAT", Routes: []Route{{"SPARECI_RUNS_ON", "spareci"}}}}}
 }
 
 func TestStartStop(t *testing.T) {
@@ -306,26 +313,35 @@ func TestLateFiringIsCoveredWhileAlive(t *testing.T) {
 	}
 }
 
+func allGroups() []Group { return AllGroups(DefaultBase, DefaultPrefix, "SPARECI_HEARTBEAT") }
+
 func TestWatchdogWorkflow(t *testing.T) {
-	w := Watchdog(Vars(DefaultBase), "SPARECI_HEARTBEAT")
+	w := Watchdog(allGroups())
 	for _, m := range Slots() {
 		if !strings.Contains(w, fmt.Sprintf("- cron: \"%s\"", Cron(m))) {
 			t.Errorf("missing cron for minute %d", m)
 		}
 	}
 	for _, want := range []string{
-		"if: (vars.SPARECI_RUNS_ON_MACOS || vars.SPARECI_RUNS_ON_LINUX || vars.SPARECI_RUNS_ON_LINUX_ARM || vars.SPARECI_RUNS_ON) && !contains(vars.SPARECI_HEARTBEAT, format('|{0}|', github.event.schedule))",
+		// Skipped unless some OS is routed and its own heartbeat doesn't list the firing.
+		"if: ((vars.SPARECI_RUNS_ON_MACOS) && !contains((vars.SPARECI_HEARTBEAT_MACOS || vars.SPARECI_HEARTBEAT), format('|{0}|', github.event.schedule))) || " +
+			"((vars.SPARECI_RUNS_ON_LINUX || vars.SPARECI_RUNS_ON_LINUX_ARM) && !contains((vars.SPARECI_HEARTBEAT_LINUX || vars.SPARECI_HEARTBEAT), format('|{0}|', github.event.schedule))) || " +
+			"((vars.SPARECI_RUNS_ON) && !contains(vars.SPARECI_HEARTBEAT, format('|{0}|', github.event.schedule)))\n",
 		"SPARECI_RUNS_ON_LINUX_ARM: ${{ vars.SPARECI_RUNS_ON_LINUX_ARM }}",
-		`if [ -n "$SPARECI_RUNS_ON_MACOS" ]; then`,
-		"actions/variables/SPARECI_RUNS_ON_MACOS",
-		"actions/variables/SPARECI_RUNS_ON_LINUX\"",
-		"actions/variables/SPARECI_RUNS_ON_LINUX_ARM",
+		"SPARECI_HEARTBEAT_LINUX: ${{ vars.SPARECI_HEARTBEAT_LINUX }}",
+		`check macOS macos "${SPARECI_HEARTBEAT_MACOS:-$SPARECI_HEARTBEAT}" "$SPARECI_RUNS_ON_MACOS"`,
+		`check Linux linux "${SPARECI_HEARTBEAT_LINUX:-$SPARECI_HEARTBEAT}" "$SPARECI_RUNS_ON_LINUX$SPARECI_RUNS_ON_LINUX_ARM"`,
+		`check SPARECI_RUNS_ON legacy "$SPARECI_HEARTBEAT" "$SPARECI_RUNS_ON"`,
+		"STALE_LINUX: ${{ steps.beat.outputs.linux }}",
+		`if [ "$STALE_LINUX" = true ]; then`,
+		`unroute SPARECI_RUNS_ON_LINUX_ARM "$SPARECI_RUNS_ON_LINUX_ARM"`,
+		`unroute SPARECI_RUNS_ON_MACOS "$SPARECI_RUNS_ON_MACOS"`,
+		`actions/variables/SPARECI_HEARTBEAT_MACOS"`,
 		"VAR_TOKEN: ${{ steps.app.outputs.token || secrets.SPARECI_TOKEN }}",
 		"uses: actions/create-github-app-token@v3",
 		"client-id: ${{ secrets.SPARECI_APP_CLIENT_ID }}",
 		"private-key: ${{ secrets.SPARECI_APP_KEY }}",
 		"if: steps.beat.outputs.stale == 'true' && env.HAS_APP == 'true'",
-		"actions/variables/SPARECI_RUNS_ON",
 		"rerun-failed-jobs",
 		"(( now - beat < 300 ))",
 	} {
@@ -364,7 +380,7 @@ func contains(s []string, v string) bool {
 
 func multiRouter(f *fake) *Router {
 	r := router(f)
-	r.Routes = Routes(DefaultBase, DefaultPrefix, []Target{TargetMacOS, TargetLinux}, true)
+	r.Groups = Groups(DefaultBase, DefaultPrefix, "SPARECI_HEARTBEAT", []Target{TargetMacOS, TargetLinux}, true)
 	return r
 }
 
@@ -451,7 +467,7 @@ func TestNames(t *testing.T) {
 	if v, l := TargetLinuxARM.Var("SPARECI_RUNS_ON"), TargetLinuxARM.Label("spareci"); v != "SPARECI_RUNS_ON_LINUX_ARM" || l != "spareci-linux-arm" {
 		t.Errorf("arm64 Linux: %s %s", v, l)
 	}
-	if got := Routes("", "spareci", Targets, true); got != nil {
+	if got := Groups("", "spareci", "SPARECI_HEARTBEAT", Targets, true); got != nil {
 		t.Errorf("empty base routes %v", got)
 	}
 }
@@ -466,7 +482,7 @@ func TestWatchdogGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := Watchdog(Vars(DefaultBase), "SPARECI_HEARTBEAT"); got != string(want) {
+	if got := Watchdog(allGroups()); got != string(want) {
 		t.Errorf("watchdog workflow differs from testdata/spareci-watchdog.yml; regenerate it and check it with Prettier")
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ import (
 
 // API is the slice of the GitHub client routing needs.
 type API interface {
+	GetVariable(ctx context.Context, repo, name string) (string, error)
 	SetVariable(ctx context.Context, repo, name, value string) error
 	DeleteVariable(ctx context.Context, repo, name string) error
 	RunJobs(ctx context.Context, repo string, runID int64) ([]gh.Job, error)
@@ -47,10 +49,15 @@ type Route struct {
 }
 
 type Router struct {
-	API          API
-	Repo         string
-	Routes       []Route // every variable this machine sets; none disables routing
-	HeartbeatVar string  // e.g. SPARECI_HEARTBEAT; "" disables the heartbeat
+	API     API
+	Repo    string
+	Groups  []Group // the variables this machine owns, by heartbeat; none disables routing
+	Machine string  // this machine's name, written in its heartbeats
+	// OldHeartbeat, when this machine doesn't own the old shared variable,
+	// is that variable's heartbeat (SPARECI_HEARTBEAT): a fresh one without
+	// a machine name is a spareci 0.2, which takes every OS, so Start
+	// refuses.
+	OldHeartbeat string
 
 	Poll       time.Duration // how often a rescue checks progress; default 3s
 	CancelWait time.Duration // how long a cancel may take before force-cancelling; default 1m
@@ -59,30 +66,116 @@ type Router struct {
 	mu       sync.Mutex // held while the routing variable is being changed
 	on       bool       // routing is wanted (between Start and Stop)
 	inflight map[int64]bool
+	hmu      sync.RWMutex      // guards held, which Routed reads without mu
+	held     map[string]bool   // groups (by Name) Stop left to another machine
+	wrote    map[string]string // the heartbeat value last written, by variable
 }
 
-// Start turns routing on and writes the first heartbeat.
+// Start checks that no other machine serves this machine's groups, then
+// turns routing on and writes the first heartbeats. Another machine's fresh
+// heartbeat in one of the groups is a *ConflictError, and nothing is set.
 func (r *Router) Start(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.on = true
-	if len(r.Routes) == 0 {
+	if len(r.Groups) == 0 {
+		r.on = true
 		return nil
 	}
-	if err := r.setLocked(ctx); err != nil {
+	if err := r.checkLocked(ctx, time.Now()); err != nil {
 		return err
 	}
-	return r.beatLocked(ctx, time.Now())
+	r.on = true
+	r.setHeld(nil)
+	// The heartbeat first: a crash in between leaves a heartbeat without
+	// routing, which routes nothing, rather than routing that the watchdog
+	// would read with another machine's heartbeat (see Watchdog).
+	if err := r.beatLocked(ctx, time.Now()); err != nil {
+		return err
+	}
+	return r.setLocked(ctx)
+}
+
+// checkLocked returns a *ConflictError if another machine's heartbeat in one
+// of this machine's groups is fresh, or a spareci 0.2 is up while this
+// machine doesn't own the old shared variable.
+func (r *Router) checkLocked(ctx context.Context, now time.Time) error {
+	groups := r.Groups
+	if r.OldHeartbeat != "" && !r.ownsLegacy() {
+		groups = append(slices.Clip(groups), Group{Heartbeat: r.OldHeartbeat})
+	}
+	for _, g := range groups {
+		if g.Heartbeat == "" {
+			continue
+		}
+		o, err := ReadOwner(ctx, r.API, r.Repo, Group{OS: g.OS, Heartbeat: g.Heartbeat}, now)
+		if err != nil {
+			return err
+		}
+		o.Group = g
+		if g.Heartbeat == r.OldHeartbeat && !r.ownsLegacy() {
+			// Only a nameless one: a 0.3 machine without --os that owns it
+			// also writes its OS groups' heartbeats, checked above.
+			if o.Fresh() && o.Machine == "" {
+				return &ConflictError{Repo: r.Repo, Owner: o}
+			}
+			continue
+		}
+		if heldBy(o, r.Machine, r.ownsLegacy()) {
+			return &ConflictError{Repo: r.Repo, Owner: o}
+		}
+	}
+	return nil
+}
+
+// Check is Start's check alone: a *ConflictError if another machine serves
+// one of this machine's groups.
+func (r *Router) Check(ctx context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.checkLocked(ctx, time.Now())
+}
+
+func (r *Router) ownsLegacy() bool {
+	for _, g := range r.Groups {
+		if g.Legacy() {
+			return true
+		}
+	}
+	return false
 }
 
 // Enabled reports whether routing is configured at all.
-func (r *Router) Enabled() bool { return len(r.Routes) > 0 }
+func (r *Router) Enabled() bool { return len(r.Groups) > 0 }
+
+// routes are the routes of the groups this machine holds.
+func (r *Router) routes() []Route {
+	r.hmu.RLock()
+	defer r.hmu.RUnlock()
+	var out []Route
+	for _, g := range r.Groups {
+		if !r.held[g.Name()] {
+			out = append(out, g.Routes...)
+		}
+	}
+	return out
+}
 
 // Vars names the routing variables, for logs.
 func (r *Router) Vars() []string {
 	var v []string
-	for _, rt := range r.Routes {
+	for _, rt := range r.routes() {
 		v = append(v, rt.Var)
+	}
+	return v
+}
+
+// Heartbeats names the heartbeat variables, for logs.
+func (r *Router) Heartbeats() []string {
+	var v []string
+	for _, g := range r.Groups {
+		if g.Heartbeat != "" && !r.isHeld(g) {
+			v = append(v, g.Heartbeat)
+		}
 	}
 	return v
 }
@@ -90,16 +183,18 @@ func (r *Router) Vars() []string {
 // Labels are the routing labels. A job carrying one was routed here.
 func (r *Router) Labels() []string {
 	var l []string
-	for _, rt := range r.Routes {
+	for _, rt := range r.routes() {
 		l = append(l, rt.Label)
 	}
 	return l
 }
 
-// Routed reports whether a job's runs-on came from one of our variables.
+// Routed reports whether a job's runs-on came from one of our variables. A
+// group Stop left to another machine isn't ours.
 func (r *Router) Routed(j gh.Job) bool {
+	routes := r.routes()
 	for _, l := range j.Labels {
-		for _, rt := range r.Routes {
+		for _, rt := range routes {
 			if strings.EqualFold(l, rt.Label) {
 				return true
 			}
@@ -109,7 +204,7 @@ func (r *Router) Routed(j gh.Job) bool {
 }
 
 func (r *Router) setLocked(ctx context.Context) error {
-	for _, rt := range r.Routes {
+	for _, rt := range r.routes() {
 		if err := r.API.SetVariable(ctx, r.Repo, rt.Var, rt.Label); err != nil {
 			return fmt.Errorf("set routing variable %s: %w", rt.Var, err)
 		}
@@ -117,21 +212,25 @@ func (r *Router) setLocked(ctx context.Context) error {
 	return nil
 }
 
-func (r *Router) clearLocked(ctx context.Context) error {
+func clearRoutes(ctx context.Context, api API, repo string, routes []Route) error {
 	var err error
-	for _, rt := range r.Routes {
-		if e := r.API.DeleteVariable(ctx, r.Repo, rt.Var); e != nil {
+	for _, rt := range routes {
+		if e := api.DeleteVariable(ctx, repo, rt.Var); e != nil {
 			err = errors.Join(err, fmt.Errorf("clear routing variable %s: %w", rt.Var, e))
 		}
 	}
 	return err
 }
 
+func (r *Router) clearLocked(ctx context.Context) error {
+	return clearRoutes(ctx, r.API, r.Repo, r.routes())
+}
+
 // Beat refreshes the heartbeat until ctx ends. It also re-asserts the routing
 // variable, which the watchdog clears if this machine looked dead (say, while
 // a laptop slept).
 func (r *Router) Beat(ctx context.Context) {
-	if len(r.Routes) == 0 {
+	if len(r.Groups) == 0 {
 		return
 	}
 	t := time.NewTicker(HeartbeatEvery)
@@ -143,6 +242,7 @@ func (r *Router) Beat(ctx context.Context) {
 		case now := <-t.C:
 			r.mu.Lock()
 			if r.on {
+				r.warnLocked(ctx, now)
 				err := r.setLocked(ctx)
 				if err == nil {
 					err = r.beatLocked(ctx, now)
@@ -156,26 +256,107 @@ func (r *Router) Beat(ctx context.Context) {
 	}
 }
 
-func (r *Router) beatLocked(ctx context.Context, now time.Time) error {
-	if r.HeartbeatVar == "" {
-		return nil
+// warnLocked logs an error for each heartbeat another machine has written
+// since this one last wrote it: both machines serve the same OS. It keeps
+// going, because stopping either would leave jobs queued for it.
+func (r *Router) warnLocked(ctx context.Context, now time.Time) {
+	for _, g := range r.Groups {
+		if g.Heartbeat == "" || r.wrote == nil {
+			continue
+		}
+		v, err := r.API.GetVariable(ctx, r.Repo, g.Heartbeat)
+		if err != nil || v == "" || v == r.wrote[g.Heartbeat] {
+			continue
+		}
+		o := Owner{Group: g}
+		if at, m, ok := ParseHeartbeat(v); ok {
+			o.Beating, o.Machine, o.Age = true, m, now.Sub(at)
+		}
+		if heldBy(o, r.Machine, r.ownsLegacy()) {
+			slog.Error("another machine serves the same OS for this repo: stop spareci on one of them, or split the OSes with --os",
+				"other", o.Who(), "group", g.Name(), "heartbeat", g.Heartbeat, "repo", r.Repo)
+		}
 	}
-	return r.API.SetVariable(ctx, r.Repo, r.HeartbeatVar, Lease(now))
 }
 
-// Stop turns routing off: runs created from now on go to GitHub-hosted runners.
+// beatLocked writes this machine's heartbeats.
+func (r *Router) beatLocked(ctx context.Context, now time.Time) error {
+	for _, g := range r.Groups {
+		if g.Heartbeat == "" || r.isHeld(g) {
+			continue
+		}
+		v := Heartbeat(now, r.Machine)
+		if err := r.API.SetVariable(ctx, r.Repo, g.Heartbeat, v); err != nil {
+			return err
+		}
+		if r.wrote == nil {
+			r.wrote = map[string]string{}
+		}
+		r.wrote[g.Heartbeat] = v
+	}
+	return nil
+}
+
+// Stop turns routing off: runs created from now on go to GitHub-hosted
+// runners. A group whose heartbeat is another machine's and fresh is left
+// alone, and Routed no longer counts its labels as this machine's: that
+// machine serves it.
 func (r *Router) Stop(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.on = false
-	if len(r.Routes) == 0 {
-		return nil
-	}
-	err := r.clearLocked(ctx)
-	if r.HeartbeatVar != "" {
-		err = errors.Join(err, r.API.DeleteVariable(ctx, r.Repo, r.HeartbeatVar))
+	var err error
+	now := time.Now()
+	for _, g := range r.Groups {
+		if r.isHeld(g) {
+			continue
+		}
+		if g.Heartbeat != "" {
+			// A failed read clears anyway: jobs going to GitHub is the safe
+			// direction.
+			if o, rerr := ReadOwner(ctx, r.API, r.Repo, Group{OS: g.OS, Heartbeat: g.Heartbeat}, now); rerr == nil {
+				o.Group = g
+				if heldBy(o, r.Machine, r.ownsLegacy()) {
+					slog.Info("leaving routing on: another machine serves it", "group", g.Name(), "machine", o.Who(), "heartbeat_age", o.Age.Round(time.Second))
+					r.hmu.Lock()
+					if r.held == nil {
+						r.held = map[string]bool{}
+					}
+					r.held[g.Name()] = true
+					r.hmu.Unlock()
+					continue
+				}
+			}
+		}
+		err = errors.Join(err, clearRoutes(ctx, r.API, r.Repo, g.Routes))
+		if g.Heartbeat != "" {
+			err = errors.Join(err, r.API.DeleteVariable(ctx, r.Repo, g.Heartbeat))
+		}
 	}
 	return err
+}
+
+func (r *Router) isHeld(g Group) bool {
+	r.hmu.RLock()
+	defer r.hmu.RUnlock()
+	return r.held[g.Name()]
+}
+
+func (r *Router) setHeld(h map[string]bool) {
+	r.hmu.Lock()
+	r.held = h
+	r.hmu.Unlock()
+}
+
+// Held names the groups Stop left to another machine.
+func (r *Router) Held() []string {
+	var out []string
+	for _, g := range r.Groups {
+		if r.isHeld(g) {
+			out = append(out, g.Name())
+		}
+	}
+	return out
 }
 
 // ErrBusy means the run has a job in progress, so cancelling it would throw
@@ -242,7 +423,7 @@ func (r *Router) Rescue(ctx context.Context, runID int64, force bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cleared := false
-	if r.on && len(r.Routes) > 0 {
+	if r.on && len(r.routes()) > 0 {
 		cleared = true
 		if err := r.clearLocked(ctx); err != nil {
 			if serr := r.setLocked(context.WithoutCancel(ctx)); serr != nil {

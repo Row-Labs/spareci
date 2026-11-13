@@ -59,6 +59,7 @@ type Config struct {
 	Cache    *cache.Server   // nil: jobs use GitHub's cache service
 	Gate     Gate            // nil: always take jobs; see gate.go
 	Stats    *stats.Recorder // nil: don't record jobs
+	Machine  string          // this machine's name, which starts its runners' names; "" for the host name
 }
 
 type Pool struct {
@@ -185,7 +186,7 @@ func (p *Pool) Run(ctx, hardCtx context.Context) error {
 				return err
 			}
 			p.routed = true
-			slog.Info("routing on", "variables", r.Vars(), "heartbeat", r.HeartbeatVar)
+			slog.Info("routing on", "variables", r.Vars(), "heartbeats", r.Heartbeats())
 		}
 		go r.Beat(ctx)
 	}
@@ -415,16 +416,19 @@ func (p *Pool) rescue(ctx context.Context, runs []int64, force bool, why string)
 	}
 }
 
-// RunnerPrefix starts the name of every runner this machine registers.
-func RunnerPrefix() string {
-	host, _ := os.Hostname()
-	return "spareci-" + strings.Split(host, ".")[0] + "-"
+// RunnerPrefix starts the name of every runner a machine registers.
+func RunnerPrefix(machine string) string {
+	if machine == "" {
+		host, _ := os.Hostname()
+		machine = strings.Split(host, ".")[0]
+	}
+	return "spareci-" + machine + "-"
 }
 
 func (p *Pool) spawn(ctx context.Context, b *Backend) error {
 	p.mu.Lock()
 	p.seq++
-	name := fmt.Sprintf("%s%d-%d", RunnerPrefix(), time.Now().Unix(), p.seq)
+	name := fmt.Sprintf("%s%d-%d", RunnerPrefix(p.cfg.Machine), time.Now().Unix(), p.seq)
 	p.mu.Unlock()
 
 	jit, err := p.gh.GenerateJIT(ctx, p.cfg.Repo, name, b.AllLabels())
@@ -616,12 +620,14 @@ func (p *Pool) drain(hardCtx context.Context) error {
 		}
 	}
 	var aborted []int64
+	waiting := 0
 	for {
 		busy, left := p.stopIdle()
+		elsewhere := 0
 		if routed {
-			p.sendBack()
+			elsewhere = p.sendBack()
 		}
-		if left == 0 {
+		if left == 0 && elsewhere == 0 {
 			break
 		}
 		if hardCtx.Err() != nil {
@@ -630,6 +636,12 @@ func (p *Pool) drain(hardCtx context.Context) error {
 		}
 		if busy > 0 {
 			slog.Info("waiting for running jobs to finish (^C again to stop them)", "jobs", busy)
+			waiting = 0
+		} else if elsewhere != waiting {
+			// Cancelling is per run: sending a queued job back now would
+			// cancel a job running on another machine or on GitHub.
+			slog.Info("waiting for jobs running elsewhere in runs with a job queued here; those go back to GitHub when they finish (^C again to cancel them now)", "runs", elsewhere)
+			waiting = elsewhere
 		}
 		select {
 		case <-hardCtx.Done():
@@ -677,14 +689,16 @@ func (p *Pool) stopIdle() (busy, left int) {
 }
 
 // sendBack starts sending runs with a job queued here to GitHub-hosted
-// runners, leaving runs with a job in progress until it ends.
-func (p *Pool) sendBack() {
+// runners, leaving runs with a job in progress until it ends. It returns
+// how many runs it left for a job in progress on a runner that isn't this
+// pool's: another machine's, or GitHub's.
+func (p *Pool) sendBack() int {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	jobs, err := p.gh.QueuedJobs(ctx, p.cfg.Repo)
 	if err != nil {
 		slog.Debug("could not list queued jobs", "err", err)
-		return
+		return 0
 	}
 	var mine []gh.Job
 	for _, j := range jobs {
@@ -692,7 +706,32 @@ func (p *Pool) sendBack() {
 			mine = append(mine, j)
 		}
 	}
-	p.rescue(ctx, runIDs(mine), false, "spareci is stopping")
+	runs := runIDs(mine)
+	elsewhere := 0
+	for _, id := range runs {
+		if p.busyElsewhere(ctx, id) {
+			elsewhere++
+		}
+	}
+	p.rescue(ctx, runs, false, "spareci is stopping")
+	return elsewhere
+}
+
+// busyElsewhere reports whether a run has a job in progress on a runner
+// that isn't one of this pool's.
+func (p *Pool) busyElsewhere(ctx context.Context, runID int64) bool {
+	jobs, err := p.gh.RunJobs(ctx, p.cfg.Repo, runID)
+	if err != nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, j := range jobs {
+		if j.Status == "in_progress" && p.workers[j.RunnerName] == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Pool) waitRescues(limit time.Duration) {
